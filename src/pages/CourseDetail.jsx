@@ -14,10 +14,14 @@ export default function CourseDetail() {
   const [sessions, setSessions] = useState([]);
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState('');
+  const [notEnrolled, setNotEnrolled] = useState(false);
 
   useEffect(() => {
     let active = true;
-    Promise.all([
+    setLoading(true);
+    setError('');
+    setNotEnrolled(false);
+    Promise.allSettled([
       api.get('/api/student/course-availability'),
       api.get(`/api/student/courses/${courseId}/materials`),
       api.get(`/api/student/courses/${courseId}/sessions`),
@@ -25,13 +29,19 @@ export default function CourseDetail() {
     ])
       .then(([avail, mats, sess, prog]) => {
         if (!active) return;
-        const found = (avail?.items || []).find((c) => String(c.course_id) === String(courseId));
+        const items = avail.status === 'fulfilled' ? avail.value?.items || [] : [];
+        if (avail.status === 'rejected') setError(avail.reason?.message || 'Failed to load course');
+        const found = items.find((c) => String(c.course_id) === String(courseId));
         setCourse(found || { course_id: courseId, title: 'Course' });
-        setMaterials(mats || []);
-        setSessions(sess || []);
-        setProgress(prog);
+        setMaterials(mats.status === 'fulfilled' ? mats.value || [] : []);
+        setSessions(sess.status === 'fulfilled' ? sess.value || [] : []);
+        if (mats.status === 'rejected' || sess.status === 'rejected') {
+          const code = mats.reason?.status || sess.reason?.status;
+          if (code === 403) setNotEnrolled(true);
+          else setError(mats.reason?.message || sess.reason?.message || 'Failed to load course content');
+        }
+        setProgress(prog.status === 'fulfilled' ? prog.value : null);
       })
-      .catch((e) => active && setError(e.message))
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
@@ -46,6 +56,19 @@ export default function CourseDetail() {
     );
   }
 
+  if (!course) {
+    return (
+      <div className="space-y-6">
+        <Link to="/courses" className="inline-flex items-center gap-1 text-sm text-indigo-600 hover:underline">
+          <ArrowLeft size={16} /> Back to courses
+        </Link>
+        <Card>
+          <p className="text-sm text-slate-500">Course not found.</p>
+        </Card>
+      </div>
+    );
+  }
+
   const pct = progress?.percentage != null ? Math.round(progress.percentage) : null;
 
   return (
@@ -55,11 +78,16 @@ export default function CourseDetail() {
       </Link>
 
       {error && <div className="rounded-2xl bg-red-50 text-red-700 text-sm px-4 py-3">{error}</div>}
+      {notEnrolled && (
+        <div className="rounded-2xl bg-amber-50 text-amber-800 text-sm px-4 py-3">
+          You are not enrolled in this course. Materials and sessions are restricted, but you can still see the course overview above.
+        </div>
+      )}
 
       <Card>
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div>
-            <h1 className="font-display font-extrabold text-2xl text-slate-900">{course.title}</h1>
+            <h1 className="font-display font-extrabold text-2xl text-slate-900">{course?.title}</h1>
             {course.course_code && (
               <p className="font-mono text-sm text-slate-400 mt-1">{course.course_code}</p>
             )}

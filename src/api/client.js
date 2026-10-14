@@ -29,7 +29,9 @@ async function request(path, { method = 'GET', body, auth = true, params } = {})
 
   if (!res.ok) {
     const message = (data && data.message) || `Request failed (${res.status})`;
-    throw new Error(message);
+    const err = new Error(message);
+    err.status = res.status;
+    throw err;
   }
   return data;
 }
