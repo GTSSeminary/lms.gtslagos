@@ -21,28 +21,47 @@ export default function CourseDetail() {
     setLoading(true);
     setError('');
     setNotEnrolled(false);
-    Promise.allSettled([
-      api.get('/api/student/course-availability'),
-      api.get(`/api/student/courses/${courseId}/materials`),
-      api.get(`/api/student/courses/${courseId}/sessions`),
-      api.get(`/api/attendance/course/${courseId}/progress`).catch(() => null),
-    ])
-      .then(([avail, mats, sess, prog]) => {
+    api
+      .get('/api/student/course-availability')
+      .then((data) => {
         if (!active) return;
-        const items = avail.status === 'fulfilled' ? avail.value?.items || [] : [];
-        if (avail.status === 'rejected') setError(avail.reason?.message || 'Failed to load course');
+        const items = data?.items || [];
         const found = items.find((c) => String(c.course_id) === String(courseId));
         setCourse(found || { course_id: courseId, title: 'Course' });
-        setMaterials(mats.status === 'fulfilled' ? mats.value || [] : []);
-        setSessions(sess.status === 'fulfilled' ? sess.value || [] : []);
-        if (mats.status === 'rejected' || sess.status === 'rejected') {
-          const code = mats.reason?.status || sess.reason?.status;
-          if (code === 403) setNotEnrolled(true);
-          else setError(mats.reason?.message || sess.reason?.message || 'Failed to load course content');
+        // "Available / Upcoming" courses are not enrolled yet — skip the calls
+        // that would otherwise return 403 and just show the overview.
+        if (!found || found.state === 'available') {
+          if (found) setNotEnrolled(true);
+          setMaterials([]);
+          setSessions([]);
+          setProgress(null);
+          setLoading(false);
+          return;
         }
-        setProgress(prog.status === 'fulfilled' ? prog.value : null);
+        Promise.allSettled([
+          api.get(`/api/student/courses/${courseId}/materials`),
+          api.get(`/api/student/courses/${courseId}/sessions`),
+          api.get(`/api/attendance/course/${courseId}/progress`).catch(() => null),
+        ])
+          .then(([mats, sess, prog]) => {
+            if (!active) return;
+            setMaterials(mats.status === 'fulfilled' ? mats.value || [] : []);
+            setSessions(sess.status === 'fulfilled' ? sess.value || [] : []);
+            if (mats.status === 'rejected' || sess.status === 'rejected') {
+              const code = mats.reason?.status || sess.reason?.status;
+              if (code === 403) setNotEnrolled(true);
+              else setError(mats.reason?.message || sess.reason?.message || 'Failed to load course content');
+            }
+            setProgress(prog.status === 'fulfilled' ? prog.value : null);
+          })
+          .finally(() => active && setLoading(false));
       })
-      .finally(() => active && setLoading(false));
+      .catch((e) => {
+        if (!active) return;
+        setError(e.message);
+        setCourse({ course_id: courseId, title: 'Course' });
+        setLoading(false);
+      });
     return () => {
       active = false;
     };

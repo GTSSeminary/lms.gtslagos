@@ -5,8 +5,6 @@ import {
   BookOpen,
   FileText,
   BarChart3,
-  CalendarCheck,
-  Award,
   User,
   LogOut,
   Menu,
@@ -14,7 +12,6 @@ import {
   GraduationCap,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { useBranding } from '../context/BrandingContext';
 
 const links = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -22,14 +19,11 @@ const links = [
   { to: '/courses', label: 'Courses', icon: GraduationCap },
   { to: '/exams', label: 'Exams', icon: FileText },
   { to: '/results', label: 'Results', icon: BarChart3 },
-  { to: '/attendance', label: 'Attendance', icon: CalendarCheck },
-  { to: '/graduation', label: 'Graduation', icon: Award },
   { to: '/profile', label: 'Profile', icon: User },
 ];
 
 export default function Layout() {
   const { user, logout } = useAuth();
-  const { schoolName, logoUrl } = useBranding();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
 
@@ -40,19 +34,19 @@ export default function Layout() {
 
   const sidebar = (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-3 px-6 py-6">
-        {logoUrl ? (
-          <img src={logoUrl} alt="" className="h-9 w-9 rounded-xl object-cover" />
-        ) : (
-          <div className="h-9 w-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-display font-bold">
-            {schoolName.charAt(0)}
-          </div>
-        )}
-        <div className="leading-tight">
-          <div className="font-display font-bold text-slate-900">{schoolName}</div>
-          <div className="text-xs text-slate-400">Student Portal</div>
-        </div>
-      </div>
+       <div className="flex items-center gap-3 px-6 py-6">
+         <div className="flex items-center justify-center w-11 h-11 rounded-xl bg-white border border-slate-200 shadow-sm overflow-hidden shrink-0">
+           <img src="/logo.svg" alt="GTS Logo" className="h-8 w-auto" />
+         </div>
+         <div className="leading-tight">
+           <div className="font-display text-[14.5px] font-bold tracking-[-0.03em] text-slate-900 leading-none">
+             Grace Theological Seminary
+           </div>
+           <div className="text-[11px] font-semibold tracking-wide text-slate-500 mt-1">
+             Student Portal
+           </div>
+         </div>
+       </div>
       <nav className="flex-1 px-3 space-y-1">
         {links.map(({ to, label, icon: Icon }) => (
           <NavLink

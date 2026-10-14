@@ -10,8 +10,6 @@ import Courses from './pages/Courses';
 import CourseDetail from './pages/CourseDetail';
 import Exams from './pages/Exams';
 import Results from './pages/Results';
-import Attendance from './pages/Attendance';
-import Graduation from './pages/Graduation';
 import Profile from './pages/Profile';
 
 export default function App() {
@@ -34,8 +32,6 @@ export default function App() {
         <Route path="/courses/:courseId" element={<CourseDetail />} />
         <Route path="/exams" element={<Exams />} />
         <Route path="/results" element={<Results />} />
-        <Route path="/attendance" element={<Attendance />} />
-        <Route path="/graduation" element={<Graduation />} />
         <Route path="/profile" element={<Profile />} />
       </Route>
 
