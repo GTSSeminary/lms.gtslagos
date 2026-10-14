@@ -11,8 +11,15 @@ export function AuthProvider({ children }) {
   async function loadUser() {
     try {
       const data = await api.get('/api/auth/me');
-      setUser(data);
-      return data;
+      // Normalize so both snake_case and camelCase name fields are present
+      // regardless of which endpoint produced the payload.
+      const normalized = {
+        ...data,
+        full_name: data.full_name ?? data.fullName,
+        fullName: data.fullName ?? data.full_name,
+      };
+      setUser(normalized);
+      return normalized;
     } catch {
       logout();
       return null;
@@ -34,8 +41,10 @@ export function AuthProvider({ children }) {
     const data = await api.post('/api/auth/login', { email, password }, { auth: false });
     localStorage.setItem('lms_token', data.token);
     setToken(data.token);
-    setUser(data.user);
-    return data.user;
+    // Load the authoritative profile from /me (it carries full_name, matric_no,
+    // status) instead of relying on the login payload's shape.
+    const user = await loadUser();
+    return user;
   }
 
   function logout() {
