@@ -52,6 +52,7 @@ export default function Results() {
                   <th className="text-left font-medium px-6 py-3">Type</th>
                   <th className="text-left font-medium px-6 py-3">Score</th>
                   <th className="text-left font-medium px-6 py-3">Status</th>
+                  <th className="text-left font-medium px-6 py-3">Lecturer feedback</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -62,6 +63,9 @@ export default function Results() {
                     <td className="px-6 py-3 font-mono text-slate-800">{r.score}</td>
                     <td className="px-6 py-3">
                       <Badge variant={r.status === 'Pass' ? 'green' : 'red'}>{r.status}</Badge>
+                    </td>
+                    <td className="px-6 py-3 text-slate-600 text-sm max-w-[280px]">
+                      {r.feedback_text ? r.feedback_text : <span className="text-slate-300">—</span>}
                     </td>
                   </tr>
                 ))}
