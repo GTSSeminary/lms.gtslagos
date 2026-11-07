@@ -4,6 +4,7 @@ import Card from '../components/Card';
 import Badge from '../components/Badge';
 import Spinner from '../components/Spinner';
 import { ExternalLink, Send } from 'lucide-react';
+import WysiwygEditor from '../components/WysiwygEditor';
 
 const ADMIN_ORIGIN = 'https://admin.gtslagos.com';
 
@@ -15,6 +16,8 @@ export default function Exams() {
   const [submitting, setSubmitting] = useState(null);
   // answers[examId][questionId] = text
   const [answers, setAnswers] = useState({});
+  // paperEssay[examId] = formatted HTML (for 'paper' exams)
+  const [paperText, setPaperText] = useState({});
   const [messages, setMessages] = useState({});
 
   useEffect(() => {
@@ -35,6 +38,27 @@ export default function Exams() {
       [examId]: { ...(a[examId] || {}), [questionId]: value },
     }));
   };
+
+  function submitPaper(exam) {
+    const id = exam.exam_id;
+    const html = String(paperText[id] || '').trim();
+    if (!html || html === '<br>') {
+      setMessages((m) => ({ ...m, [id]: 'Please write your paper before submitting.' }));
+      return;
+    }
+    setSubmitting(id);
+    setMessages((m) => ({ ...m, [id]: '' }));
+    api
+      .post(`/api/exams/${id}/student-submit`, { answers: { paper: html }, type: 'paper' })
+      .then(() => {
+        setSubmitted((s) => ({ ...s, [id]: true }));
+        setMessages((m) => ({ ...m, [id]: 'Submitted — awaiting marking.' }));
+      })
+      .catch((e) => {
+        setMessages((m) => ({ ...m, [id]: e.message }));
+      })
+      .finally(() => setSubmitting(null));
+  }
 
   function submitEssay(exam) {
     const id = exam.exam_id;
@@ -93,6 +117,7 @@ export default function Exams() {
           {exams.map((exam) => {
             const id = exam.exam_id;
             const isMcq = exam.exam_type === 'mcq';
+            const isPaper = exam.exam_type === 'paper';
             const questions = exam.questions || [];
             const own = answers[id] || {};
             const answeredCount = questions.filter((q) => String(own[q.id] || '').trim()).length;
@@ -108,6 +133,16 @@ export default function Exams() {
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-1">
                     <Badge variant={isMcq ? 'indigo' : 'amber'}>{exam.exam_type}</Badge>
+                    {isMcq && exam.duration_minutes > 0 && (
+                      <span className="text-[11px] font-medium text-indigo-700 bg-indigo-50 rounded-full px-2 py-0.5">
+                        Timed · {exam.duration_minutes} min
+                      </span>
+                    )}
+                    {isPaper && (
+                      <span className="text-[11px] font-medium text-amber-700 bg-amber-50 rounded-full px-2 py-0.5">
+                        Write & format one paper
+                      </span>
+                    )}
                     {!isMcq && questions.length > 0 && (
                       <span className="text-[11px] font-medium text-slate-500 bg-slate-100 rounded-full px-2 py-0.5">
                         {questions.length} {questions.length === 1 ? 'Question' : 'Questions'}
@@ -140,6 +175,29 @@ export default function Exams() {
                     </a>
                   ) : submitted[id] || exam.submission_id ? (
                     <Badge variant="green">Submitted</Badge>
+                  ) : isPaper ? (
+                    <div className="space-y-3">
+                      <p className="text-xs text-slate-500">
+                        Write your paper below — you can format it (headings, bold, lists) and insert images.
+                      </p>
+                      <WysiwygEditor
+                        value={paperText[id] || ''}
+                        onChange={(html) => setPaperText((p) => ({ ...p, [id]: html }))}
+                        placeholder="Begin your paper…"
+                      />
+                      <button
+                        onClick={() => submitPaper(exam)}
+                        disabled={submitting === id}
+                        className="inline-flex items-center gap-1 rounded-2xl bg-indigo-600 text-white px-4 py-2 text-sm font-medium hover:bg-indigo-700 disabled:opacity-60"
+                      >
+                        {submitting === id ? (
+                          <Spinner className="h-4 w-4 border-white border-t-transparent" />
+                        ) : (
+                          <Send size={16} />
+                        )}
+                        Submit paper
+                      </button>
+                    </div>
                   ) : (
                     <div className="space-y-4">
                       {questions.map((q, index) => (
