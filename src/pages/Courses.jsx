@@ -22,13 +22,22 @@ const stateBadge = {
 export default function Courses() {
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState([]);
+  const [plan, setPlan] = useState(null);
+  const [nextUp, setNextUp] = useState(null);
+  const [progress, setProgress] = useState({ completed: 0, total: 0 });
   const [error, setError] = useState('');
 
   useEffect(() => {
     let active = true;
     api
       .get('/api/student/course-availability')
-      .then((data) => active && setItems(data?.items || []))
+      .then((data) => {
+        if (!active) return;
+        setItems(data?.items || []);
+        setPlan(data?.plan || null);
+        setNextUp(data?.next || null);
+        setProgress(data?.progress || { completed: 0, total: 0 });
+      })
       .catch((e) => active && setError(e.message))
       .finally(() => active && setLoading(false));
     return () => {
@@ -50,8 +59,52 @@ export default function Courses() {
     <div className="space-y-8">
       <div>
         <h1 className="font-display font-extrabold text-2xl md:text-3xl text-slate-900">Courses</h1>
-        <p className="text-slate-500 text-sm mt-1">Your enrollment across all study sets</p>
+        <p className="text-slate-500 text-sm mt-1">
+          {plan
+            ? `${plan.name}${plan.year ? ` · ${plan.year}` : ''}`
+            : 'Your enrollment across all study sets'}
+        </p>
       </div>
+
+      {nextUp && (
+        <Link to={`/courses/${nextUp.course_id}`} className="block">
+          <div className="rounded-2xl border border-indigo-200 bg-gradient-to-r from-indigo-600 to-indigo-500 text-white p-5 sm:p-6">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-indigo-200">
+                  Next up
+                </p>
+                <h3 className="font-display font-bold text-lg sm:text-xl mt-1">{nextUp.title}</h3>
+                {nextUp.start_date && (
+                  <p className="text-indigo-100 text-sm mt-1">Starts {nextUp.start_date}</p>
+                )}
+              </div>
+              <span className="rounded-full bg-white/15 px-4 py-2 text-sm font-medium inline-flex items-center gap-2">
+                Open course <span aria-hidden="true">→</span>
+              </span>
+            </div>
+          </div>
+        </Link>
+      )}
+
+      {progress.total > 0 && (
+        <div>
+          <div className="flex items-center justify-between text-sm mb-1.5">
+            <span className="text-slate-500 font-medium">Plan progress</span>
+            <span className="text-slate-700 font-semibold">
+              {progress.completed} of {progress.total} completed
+            </span>
+          </div>
+          <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-all"
+              style={{
+                width: `${Math.round((progress.completed / progress.total) * 100)}%`,
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {error && <div className="rounded-2xl bg-red-50 text-red-700 text-sm px-4 py-3">{error}</div>}
 

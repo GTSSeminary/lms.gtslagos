@@ -16,7 +16,7 @@ import {
 export default function Dashboard() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
-  const [data, setData] = useState({ active: 0, eligible: 0, total: 0, grad: null });
+  const [data, setData] = useState({ active: 0, eligible: 0, total: 0, grad: null, plan: null, next: null, progress: { completed: 0, total: 0 } });
 
   useEffect(() => {
     let active = true;
@@ -35,6 +35,9 @@ export default function Dashboard() {
           eligible,
           total: reports?.length || 0,
           grad: grad || null,
+          plan: avail?.plan || null,
+          next: avail?.next || null,
+          progress: avail?.progress || { completed: 0, total: 0 },
         });
       })
       .catch(() => {})
@@ -105,6 +108,46 @@ export default function Dashboard() {
               </Link>
             ))}
           </div>
+
+          {(data.plan || data.next) && (
+            <Card className="border border-indigo-100 bg-indigo-50/50">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-indigo-500">
+                    {data.next ? 'Next up' : 'Study plan'}
+                  </p>
+                  <div className="font-medium text-slate-800 mt-0.5">
+                    {data.next ? (
+                      <Link to={`/courses/${data.next.course_id}`} className="hover:text-indigo-600">
+                        {data.next.title} →
+                      </Link>
+                    ) : (
+                      (data.plan?.name || '—')
+                    )}
+                  </div>
+                  {data.plan && data.next && (
+                    <div className="text-sm text-slate-500 mt-0.5">
+                      {data.plan.name}
+                      {data.plan.year ? ` · ${data.plan.year}` : ''}
+                    </div>
+                  )}
+                </div>
+                {data.progress?.total > 0 && (
+                  <div className="text-right min-w-[140px]">
+                    <div className="text-sm text-slate-600 font-medium mb-1">
+                      {data.progress.completed}/{data.progress.total} completed
+                    </div>
+                    <div className="h-2 rounded-full bg-indigo-100 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-indigo-500"
+                        style={{ width: `${Math.round((data.progress.completed / data.progress.total) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Card>
+          )}
 
           {data.grad && (
             <Card className="flex items-center justify-between flex-wrap gap-3">
