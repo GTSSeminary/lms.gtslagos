@@ -1,0 +1,9198 @@
+import React, { useEffect, useMemo, useState } from 'react'
+import { Download, MoreVertical, Upload, X, Users, BookOpen, ClipboardCheck, GraduationCap, BarChart3, FileText, UserCog, Settings, Layers, UserPlus, SquarePen, Search, Plus, Building2, Palette, Plug, Shield, Copy, ExternalLink, Eye, Library, Link2, Sparkles, Mail, Sliders, BookmarkCheck, RefreshCw, AlertTriangle, Printer, Trash2, KeyRound, Video } from 'lucide-react'
+import { Link, useLocation } from 'react-router-dom'
+import AppShell from '../components/AppShell'
+import Card from '../components/ui/Card'
+import Badge from '../components/ui/Badge'
+import DataTable from '../components/ui/DataTable'
+import apiClient from '../api/client'
+import { useDialog } from '../components/useDialog'
+import { useAuth } from '../context/AuthContext'
+
+const DEFAULT_STUDENT_PASSWORD = 'Student123!'
+import { lecturerNavGroups } from '../constants/lecturerNav'
+import { fmtDate, fmtDateRange } from '../utils/formatDate'
+import EmailProcesses from '../components/EmailProcesses'
+import EmailFormats from '../components/EmailFormats'
+import SettingsBookMinistryPanel from '../components/SettingsBookMinistryPanel'
+import LmsIntegrationPanel from '../components/LmsIntegrationPanel'
+import EmailComposeModal from '../components/EmailComposeModal'
+
+const CLASS_DAY_INDEX = {
+  Sunday: 0,
+  Monday: 1,
+  Tuesday: 2,
+  Wednesday: 3,
+  Thursday: 4,
+  Friday: 5,
+  Saturday: 6,
+}
+
+const suggestCourseEndDate = (startDate, durationWeeks, classDay) => {
+  if (!startDate || !durationWeeks || !classDay) return ''
+  const start = new Date(`${startDate}T00:00:00`)
+  if (Number.isNaN(start.getTime())) return ''
+
+  const targetDay = CLASS_DAY_INDEX[classDay]
+  if (targetDay === undefined) return ''
+
+  const diffToFirstClass = (targetDay - start.getDay() + 7) % 7
+  const firstClassDate = new Date(start)
+  firstClassDate.setDate(firstClassDate.getDate() + diffToFirstClass)
+
+  const weeks = Math.max(1, Number(durationWeeks))
+  const lastClassDate = new Date(firstClassDate)
+  lastClassDate.setDate(lastClassDate.getDate() + (weeks - 1) * 7)
+
+  return lastClassDate.toISOString().slice(0, 10)
+}
+
+const ALL_STATUSES = ['Applied', 'Under Review', 'Accepted', 'Prospective', 'Active', 'On Hold', 'Suspended', 'Withdrawn', 'Transferred', 'Graduating', 'Completed', 'Graduated', 'Alumni']
+
+const STATUS_COLORS = {
+  Applied: 'bg-slate-100 text-slate-700',
+  'Under Review': 'bg-amber-100 text-amber-800',
+  Accepted: 'bg-sky-100 text-sky-800',
+  Prospective: 'bg-yellow-100 text-yellow-800',
+  Active: 'bg-emerald-100 text-emerald-800',
+  'On Hold': 'bg-orange-100 text-orange-800',
+  Suspended: 'bg-red-100 text-red-800',
+  Withdrawn: 'bg-gray-200 text-gray-700',
+  Transferred: 'bg-sky-100 text-sky-800',
+  Graduating: 'bg-sky-200 text-sky-800',
+  Completed: 'bg-sky-100 text-indigo-700',
+  Graduated: 'bg-gold-200 text-gold-800',
+  Alumni: 'bg-slate-200 text-slate-700',
+}
+
+const toLocalInput = (value) => {
+  if (!value) return ''
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+const buildDefaultLiveSchedule = () =>
+  Array.from({ length: 6 }, (_, i) => ({
+    class_number: i + 1,
+    class_mode: 'physical',
+    start_at: '',
+    end_at: '',
+    zoom_meeting_number: '',
+    zoom_passcode: '',
+  }))
+
+const LecturerDashboard = () => {
+  const { user } = useAuth()
+  const { confirm: dialogConfirm, prompt: dialogPrompt, host: dialogHost } = useDialog()
+  const location = useLocation()
+  const section = location.pathname.split('/')[2] || 'courses'
+
+  const [courses, setCourses] = useState([])
+  const [batches, setBatches] = useState([])
+  const [selectedBatchId, setSelectedBatchId] = useState('')
+  const [batchStudents, setBatchStudents] = useState([])
+  const [allStudents, setAllStudents] = useState([])
+  const [selectedCourseId, setSelectedCourseId] = useState('')
+
+  const [attendanceStatus, setAttendanceStatus] = useState({ activeSession: null, attendanceSession: null, isLive: false, lmsPresent: 0, classNumber: null, startTime: null, endTime: null, mode: null, sessionId: null, meetLink: null, zoomMeetingNumber: null, zoomPasscode: null, meetingRole: null, present: 0 })
+  const [attendanceHistory, setAttendanceHistory] = useState([])
+  const [attendanceRoster, setAttendanceRoster] = useState([])
+  const [attendanceSummary, setAttendanceSummary] = useState([])
+  const [selectedClassNumber, setSelectedClassNumber] = useState('1')
+  const [liveClassMode, setLiveClassMode] = useState('online')
+  const [liveMeetingNumber, setLiveMeetingNumber] = useState('4579799335')
+  const [livePasscode, setLivePasscode] = useState('4XRBA0')
+  const [liveClassStart, setLiveClassStart] = useState('')
+  const [liveClassEnd, setLiveClassEnd] = useState('')
+  const [showLiveClassDrawer, setShowLiveClassDrawer] = useState(false)
+  const [liveClassSchedule, setLiveClassSchedule] = useState(() => buildDefaultLiveSchedule())
+  const [liveScheduleSaving, setLiveScheduleSaving] = useState(false)
+
+  const [courseForm, setCourseForm] = useState({
+    title: '',
+    courseCode: '',
+    lecturerName: '',
+    durationWeeks: 6,
+    minAttendanceRequired: 4,
+    hasAssignment: false,
+    hasExam: false,
+  })
+  const [studentForm, setStudentForm] = useState({
+    fullName: '',
+    email: '',
+    phone: '',
+    matricNo: '',
+    comments: '',
+    status: 'Prospective',
+    cohortId: '',
+    password: '',
+  })
+  const [studentUploadFile, setStudentUploadFile] = useState(null)
+  const [courseUploadFile, setCourseUploadFile] = useState(null)
+  const [courseSearch, setCourseSearch] = useState('')
+  const [studentSearch, setStudentSearch] = useState('')
+  const [selectedStudent, setSelectedStudent] = useState(null)
+  const [studentEditForm, setStudentEditForm] = useState(null)
+  const [studentHistory, setStudentHistory] = useState({ enrollments: [], activities: [] })
+  const [studentTimeline, setStudentTimeline] = useState([])
+  const [enrollmentNotesEdits, setEnrollmentNotesEdits] = useState({})
+  const [loadingStudentHistory, setLoadingStudentHistory] = useState(false)
+  const [coursesLoading, setCoursesLoading] = useState(false)
+  const [allStudentsLoading, setAllStudentsLoading] = useState(false)
+  const [graduationMatrixLoading, setGraduationMatrixLoading] = useState(false)
+  const [newStatusInput, setNewStatusInput] = useState('')
+  const [profileImageFile, setProfileImageFile] = useState(null)
+  const [profileImageUploading, setProfileImageUploading] = useState(false)
+
+  const [assignmentForm, setAssignmentForm] = useState({ title: '', description: '', dueDate: '', file: null })
+
+  const [examsTab, setExamsTab] = useState('assignments')
+  const [exams, setExams] = useState([])
+  const [examsLoading, setExamsLoading] = useState(false)
+  const [examForm, setExamForm] = useState({
+    title: '',
+    description: '',
+    dueDate: '',
+    examType: 'essay',
+    planId: '',
+    durationMinutes: '',
+    resultsReleaseAt: '',
+    questions: [{ text: '', options: [{ key: 'A', label: '' }, { key: 'B', label: '' }], correctAnswer: 'A' }],
+  })
+  const [examEligible, setExamEligible] = useState([])
+  const [examSelected, setExamSelected] = useState({})
+  const [examSendTarget, setExamSendTarget] = useState(null)
+  const [examSending, setExamSending] = useState(false)
+  const [examSendResult, setExamSendResult] = useState(null)
+  const [examSubmissionsView, setExamSubmissionsView] = useState(null)
+  const [examSubmissions, setExamSubmissions] = useState([])
+  const [examSubmissionsLoading, setExamSubmissionsLoading] = useState(false)
+  const [examResultsSending, setExamResultsSending] = useState(false)
+  const [examSavedListOpen, setExamSavedListOpen] = useState(false)
+  const [markingExams, setMarkingExams] = useState([])
+  const [markingLoading, setMarkingLoading] = useState(false)
+  const [markingDetail, setMarkingDetail] = useState(null)
+  const [markingDetailLoading, setMarkingDetailLoading] = useState(false)
+  const [markingSubmissions, setMarkingSubmissions] = useState([])
+  const [markingQuestions, setMarkingQuestions] = useState([])
+  const [markRow, setMarkRow] = useState(null)
+  const [markScore, setMarkScore] = useState('')
+  const [markFeedback, setMarkFeedback] = useState('')
+  const [markSaving, setMarkSaving] = useState(false)
+  const [releaseEdits, setReleaseEdits] = useState({})
+
+  const [attendanceForm, setAttendanceForm] = useState({ date: '', startTime: '', endTime: '', secondaryLecturerId: '', lecturerNotes: '' })
+  const [editingSession, setEditingSession] = useState(null) // { session, roster }
+  const [editSessionLoading, setEditSessionLoading] = useState(false)
+  const [deleteSessionReason, setDeleteSessionReason] = useState('')
+  const [showDeleteSessionConfirm, setShowDeleteSessionConfirm] = useState(false)
+  const [showAddAttendance, setShowAddAttendance] = useState(false)
+  const [showAttendanceHistory, setShowAttendanceHistory] = useState(false)
+  const [attendanceStudentSort, setAttendanceStudentSort] = useState('name')
+  const [attendanceStudentFilter, setAttendanceStudentFilter] = useState('all')
+  const [attendanceStudentSearch, setAttendanceStudentSearch] = useState('')
+
+  const [courseResults, setCourseResults] = useState([])
+  const [resultSortBy, setResultSortBy] = useState('name')
+  const [selectedResultType, setSelectedResultType] = useState('Final')
+  const [resultCohortFilter, setResultCohortFilter] = useState('')
+  const [courseAllEnrollments, setCourseAllEnrollments] = useState([])
+  const [resultRowEdits, setResultRowEdits] = useState({})
+  const [editingResultRowId, setEditingResultRowId] = useState(null)
+  const [resultUploadFile, setResultUploadFile] = useState(null)
+  const [resultUploadSummary, setResultUploadSummary] = useState(null)
+  const [resultsTab, setResultsTab] = useState('input')
+  const [resultsHistory, setResultsHistory] = useState([])
+  const [resultsHistoryLoading, setResultsHistoryLoading] = useState(false)
+  const [historyOpenCohort, setHistoryOpenCohort] = useState(null)
+  const [resultPlanId, setResultPlanId] = useState('')
+  const [resultCourseId, setResultCourseId] = useState('')
+  const [planCourses, setPlanCourses] = useState([])
+  const [planGrid, setPlanGrid] = useState(null)
+  const [planGridLoading, setPlanGridLoading] = useState(false)
+  const [planGridEdits, setPlanGridEdits] = useState({})
+  const [planGridResultType, setPlanGridResultType] = useState('Final')
+  const [includeAllStudents, setIncludeAllStudents] = useState(false)
+  const [historySearch, setHistorySearch] = useState('')
+
+  const [reportStats, setReportStats] = useState(null)
+  const [attendanceReport, setAttendanceReport] = useState(null)
+  const [reportFilters, setReportFilters] = useState({ year: '', batchId: '', courseId: '' })
+  const [reportLoading, setReportLoading] = useState(false)
+  const [openGraduationActionFor, setOpenGraduationActionFor] = useState(null)
+
+  const [courseStudents, setCourseStudents] = useState([])
+  const [calendarYear, setCalendarYear] = useState(new Date().getFullYear())
+  const [coursesTab, setCoursesTab] = useState('courses') // 'courses' | 'plans' | 'timeline'
+  const [plans, setPlans] = useState([])
+  const [selectedPlan, setSelectedPlan] = useState(null)
+  const [planForm, setPlanForm] = useState({ name: '', year: new Date().getFullYear() })
+  const [planItemForm, setPlanItemForm] = useState({ courseId: '', startDate: '', endDate: '' })
+  const [planLoading, setPlanLoading] = useState(false)
+  const [editingPlan, setEditingPlan] = useState(null) // { id, name, year }
+  const [eligibleStudents, setEligibleStudents] = useState([])
+  const [cohorts, setCohorts] = useState([])
+  const [cohortForm, setCohortForm] = useState({ name: '', startDate: '', endDate: '' })
+  const [editingCohortId, setEditingCohortId] = useState(null)
+  const [cohortEditForm, setCohortEditForm] = useState({ name: '', startDate: '', endDate: '', status: 'active' })
+  const [draggingCohortId, setDraggingCohortId] = useState(null)
+  const [showBatchDrawer, setShowBatchDrawer] = useState(false)
+  const [batchViewFilter, setBatchViewFilter] = useState('active')
+  const [expandedCohortIds, setExpandedCohortIds] = useState(new Set())
+  const [showCreateStudentModal, setShowCreateStudentModal] = useState(false)
+  const [showCreateBatchModal, setShowCreateBatchModal] = useState(false)
+  const [showStudentUploadModal, setShowStudentUploadModal] = useState(false)
+  const [showCreateCourseModal, setShowCreateCourseModal] = useState(false)
+  const [showCourseBulkModal, setShowCourseBulkModal] = useState(false)
+  const [studentCohortFilter, setStudentCohortFilter] = useState('')
+  const [studentStatusFilter, setStudentStatusFilter] = useState('current')
+  const [graduationSearch, setGraduationSearch] = useState('')
+  const [graduationMatrix, setGraduationMatrix] = useState({ courses: [], students: [] })
+  const [graduationSortBy, setGraduationSortBy] = useState('progress')
+  const [graduationStatusFilter, setGraduationStatusFilter] = useState('all')
+  const [graduationCohortFilter, setGraduationCohortFilter] = useState('')
+  const [showGradReport, setShowGradReport] = useState(false)
+  const [graduationSets, setGraduationSets] = useState([])
+  const [graduationView, setGraduationView] = useState('matrix')
+  const [setEditor, setSetEditor] = useState(null)
+  const [showSetReport, setShowSetReport] = useState(null)
+  const [setReportData, setSetReportData] = useState(null)
+  const [setReportDataLoading, setSetReportDataLoading] = useState(false)
+  const [setEditorSaving, setSetEditorSaving] = useState(false)
+  const [lecturers, setLecturers] = useState([])
+  const [lecturerForm, setLecturerForm] = useState({ name: '', email: '', phone: '' })
+  const [editingLecturerId, setEditingLecturerId] = useState(null)
+  const [lecturerEditForm, setLecturerEditForm] = useState({ name: '', email: '', phone: '' })
+  const [timelinePlanItems, setTimelinePlanItems] = useState([])
+  const [timelinePlanLoading, setTimelinePlanLoading] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [settingsTab, setSettingsTab] = useState('school')
+  const [integrationsSubTab, setIntegrationsSubTab] = useState('book-ministry')
+  const [schoolInfo, setSchoolInfo] = useState({ school_name: '', short_name: '', school_email: '', school_phone: '', school_address: '', logo_url: '', academic_year: '', current_session: '' })
+  const [schoolLoading, setSchoolLoading] = useState(false)
+  const [schoolSaving, setSchoolSaving] = useState(false)
+  const [appearance, setAppearance] = useState({ theme: localStorage.getItem('gts_theme') || 'light', fontSize: localStorage.getItem('gts_font_size') || 'comfortable' })
+  const [appearanceSaving, setAppearanceSaving] = useState(false)
+  const [copiedEmbedId, setCopiedEmbedId] = useState(null)
+  const [forms, setForms] = useState([])
+  const [formsLoading, setFormsLoading] = useState(false)
+  const [editingForm, setEditingForm] = useState(null)
+  const [formBuilderOpen, setFormBuilderOpen] = useState(false)
+  const [formSubmissions, setFormSubmissions] = useState([])
+  const [submissionsLoading, setSubmissionsLoading] = useState(false)
+  const [selectedFormForSubmissions, setSelectedFormForSubmissions] = useState(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null)
+  const [emailSelection, setEmailSelection] = useState(() => new Set())
+  const [emailModalOpen, setEmailModalOpen] = useState(false)
+  const [emailModalSubs, setEmailModalSubs] = useState([])
+  const [validNextStatuses, setValidNextStatuses] = useState([])
+  const [statusHistory, setStatusHistory] = useState([])
+  const [statusTransitionReason, setStatusTransitionReason] = useState('')
+  const [lightboxOpen, setLightboxOpen] = useState(false)
+  const [statusConfirmOpen, setStatusConfirmOpen] = useState(false)
+  const [pendingStatus, setPendingStatus] = useState(null)
+  const [statusSaving, setStatusSaving] = useState(false)
+  const [copiedFormId, setCopiedFormId] = useState(null)
+  const [quickStatusStudent, setQuickStatusStudent] = useState(null)
+  const [quickStatusOptions, setQuickStatusOptions] = useState([])
+  const [quickSelectedStatus, setQuickSelectedStatus] = useState(null)
+  const [quickStatusReason, setQuickStatusReason] = useState('')
+  const [quickStatusSaving, setQuickStatusSaving] = useState(false)
+  const [showQuickStatus, setShowQuickStatus] = useState(false)
+  const [panelStatusOpen, setPanelStatusOpen] = useState(false)
+  const [gradVetting, setGradVetting] = useState(null) // { student, targetStatus }
+  const [gradVettingConfirm, setGradVettingConfirm] = useState({})
+  const [gradVettingReason, setGradVettingReason] = useState('')
+  const [gradVettingSaving, setGradVettingSaving] = useState(false)
+
+  const [prospectiveStudents, setProspectiveStudents] = useState([])
+  const [prospectiveStudentsLoading, setProspectiveStudentsLoading] = useState(false)
+  const [studentsTab, setStudentsTab] = useState('students')
+
+  const notify = (message) => {
+    setNotice(message)
+    setTimeout(() => setNotice(''), 3500)
+  }
+
+  const loadForms = async () => {
+    setFormsLoading(true)
+    try {
+      const res = await apiClient.get('/forms')
+      setForms(res.data)
+    } catch {
+      notify('Failed to load forms')
+    } finally {
+      setFormsLoading(false)
+    }
+  }
+
+  const loadFormSubmissions = async (formId) => {
+    setSubmissionsLoading(true)
+    try {
+      const res = await apiClient.get(`/forms/${formId}/submissions`)
+      setFormSubmissions(res.data)
+    } catch {
+      notify('Failed to load submissions')
+    } finally {
+      setSubmissionsLoading(false)
+    }
+  }
+
+  // Map a submission data key (field id) to its human label for display.
+  const selectedFormFields = forms.find(
+    (f) => String(f.id) === String(selectedFormForSubmissions)
+  )?.fields || []
+  const labelFor = (id) =>
+    selectedFormFields.find((f) => String(f.id) === String(id))?.label || id
+
+  const toggleEmailSelect = (id) => {
+    setEmailSelection((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const openEmailFor = (ids) => {
+    const list = formSubmissions.filter((s) => ids.includes(s.id))
+    if (!list.length) return
+    setEmailModalSubs(list)
+    setEmailModalOpen(true)
+  }
+
+  const loadProspectiveStudents = async () => {
+    setProspectiveStudentsLoading(true)
+    try {
+      const res = await apiClient.get('/forms/prospective-students')
+      setProspectiveStudents(res.data)
+    } catch {
+      notify('Failed to load prospective students')
+    } finally {
+      setProspectiveStudentsLoading(false)
+    }
+  }
+
+  const saveForm = async (formData) => {
+    try {
+      // Only PATCH when editing an existing form with a real id (templates use id: null)
+      let savedForm = null
+      if (editingForm?.id) {
+        const res = await apiClient.patch(`/forms/${editingForm.id}`, formData)
+        savedForm = res.data
+        notify('Form updated')
+      } else {
+        const res = await apiClient.post('/forms', formData)
+        savedForm = res.data
+        notify('Form created')
+      }
+      setEditingForm(null)
+      setFormBuilderOpen(false)
+      if (savedForm) {
+        // Optimistically update local state with the authoritative server response (includes fields)
+        setForms((prev) => {
+          const exists = prev.some((f) => String(f.id) === String(savedForm.id))
+          if (exists) return prev.map((f) => (String(f.id) === String(savedForm.id) ? savedForm : f))
+          return [savedForm, ...prev]
+        })
+      }
+      await loadForms()
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to save form')
+    }
+  }
+
+  const openFormForEdit = async (form) => {
+    try {
+      // Always fetch the full form (with fields) by id to avoid stale list data that may lack fields
+      const res = await apiClient.get(`/forms/${form.id}`)
+      setEditingForm(res.data)
+      setFormBuilderOpen(true)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to load form details')
+    }
+  }
+
+  const openGraduationCalendarTemplate = () => {
+    setEditingForm({
+      ...GRADUATION_CALENDAR_TEMPLATE,
+      id: null,
+      fields: GRADUATION_CALENDAR_TEMPLATE.fields.map((f) => ({
+        ...f,
+        field_type: f.fieldType,
+        maps_to_column: f.mapsToColumn,
+        field_conditions: f.fieldConditions,
+      })),
+      maps_to_student: false,
+      status: 'draft',
+      title: GRADUATION_CALENDAR_TEMPLATE.title,
+      slug: GRADUATION_CALENDAR_TEMPLATE.slug,
+      description: GRADUATION_CALENDAR_TEMPLATE.description,
+      _template: 'graduation_calendar',
+    })
+    setFormBuilderOpen(true)
+  }
+
+  const deleteForm = async (formId) => {
+    if (!(await dialogConfirm('This form and all its submissions will be permanently deleted.', { title: 'Delete form', confirmLabel: 'Delete' }))) return
+    try {
+      await apiClient.delete(`/forms/${formId}`)
+      notify('Form deleted')
+      await loadForms()
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to delete form')
+    }
+  }
+
+  const toggleFormStatus = async (form) => {
+    const nextStatus = form.status === 'active' ? 'closed' : 'active'
+    try {
+      await apiClient.patch(`/forms/${form.id}`, { status: nextStatus })
+      notify(`Form ${nextStatus === 'active' ? 'opened' : 'closed'}`)
+      await loadForms()
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to update form status')
+    }
+  }
+
+  const reviewSubmission = async (submissionId, status, notes) => {
+    try {
+      await apiClient.patch(`/forms/submissions/${submissionId}/review`, { status, reviewNotes: notes })
+      notify(`Submission ${status}`)
+      if (selectedFormForSubmissions) {
+        await loadFormSubmissions(selectedFormForSubmissions)
+      }
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to review submission')
+    }
+  }
+
+  const deleteSubmission = async (submissionId) => {
+    try {
+      await apiClient.delete(`/forms/submissions/${submissionId}`)
+      notify('Submission deleted')
+      setConfirmDeleteId(null)
+      if (selectedFormForSubmissions) {
+        await loadFormSubmissions(selectedFormForSubmissions)
+      }
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to delete submission')
+    }
+  }
+
+  const loadLecturers = async () => {
+    try {
+      const res = await apiClient.get('/lecturers')
+      setLecturers(res.data)
+    } catch { /* silently ignore */ }
+  }
+
+  const loadSchoolInfo = async () => {
+    setSchoolLoading(true)
+    try {
+      const res = await apiClient.get('/settings')
+      const all = res.data || {}
+      // Backend returns { key: {value, description} } or flat {key: value}
+      const getVal = (k) => {
+        const v = all[k]
+        if (v == null) return ''
+        if (typeof v === 'object' && 'value' in v) return v.value || ''
+        return String(v)
+      }
+      setSchoolInfo({
+        school_name: getVal('school_name') || getVal('name') || '',
+        short_name: getVal('short_name') || getVal('shortName') || '',
+        school_email: getVal('school_email') || getVal('email') || '',
+        school_phone: getVal('school_phone') || getVal('phone') || '',
+        school_address: getVal('school_address') || getVal('address') || '',
+        logo_url: getVal('logo_url') || getVal('logoUrl') || '',
+        academic_year: getVal('academic_year') || getVal('academicYear') || '',
+        current_session: getVal('current_session') || getVal('currentSession') || '',
+      })
+    } catch {
+      // keep defaults
+    } finally { setSchoolLoading(false) }
+  }
+
+  const saveSchoolInfo = async () => {
+    if (!schoolInfo.school_name?.trim()) { notify('School name is required'); return }
+    setSchoolSaving(true)
+    try {
+      const payload = {
+        school_name: schoolInfo.school_name,
+        short_name: schoolInfo.short_name,
+        school_email: schoolInfo.school_email,
+        school_phone: schoolInfo.school_phone,
+        school_address: schoolInfo.school_address,
+        logo_url: schoolInfo.logo_url,
+        academic_year: schoolInfo.academic_year,
+        current_session: schoolInfo.current_session,
+      }
+      await apiClient.patch('/settings', { settings: payload })
+      notify('School info saved')
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to save school info')
+    } finally { setSchoolSaving(false) }
+  }
+
+  const saveAppearance = async () => {
+    setAppearanceSaving(true)
+    try {
+      localStorage.setItem('gts_theme', appearance.theme)
+      localStorage.setItem('gts_font_size', appearance.fontSize)
+      try {
+        await apiClient.patch('/settings', { settings: { theme: appearance.theme, font_size: appearance.fontSize } })
+      } catch { /* localStorage fallback is fine */ }
+      notify('Appearance saved')
+    } finally { setAppearanceSaving(false) }
+  }
+
+  const loadCourses = async () => {
+    setCoursesLoading(true)
+    try {
+      const response = await apiClient.get('/courses')
+      const ownCourses = user?.role === 'admin'
+        ? response.data
+        : response.data.filter(
+            (course) => Number(course.lecturer_id) === Number(user?.id) || Number(course.created_by) === Number(user?.id)
+          )
+      setCourses(ownCourses)
+      if (!selectedCourseId && ownCourses.length) {
+        const currentCourse = ownCourses.find((course) => Boolean(course.is_current))
+        setSelectedCourseId(String(currentCourse?.id || ownCourses[0].id))
+      }
+    } catch (err) {
+      if (courses.length === 0) notify('Failed to load courses')
+    } finally {
+      setCoursesLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    const currentCourse = courses.find((course) => Boolean(course.is_current))
+    if (currentCourse && String(selectedCourseId || '') !== String(currentCourse.id)) {
+      setSelectedCourseId(String(currentCourse.id))
+    }
+  }, [courses])
+
+  const loadAllStudents = async () => {
+    setAllStudentsLoading(true)
+    try {
+      const response = await apiClient.get('/students')
+      setAllStudents(response.data)
+      return response.data
+    } finally {
+      setAllStudentsLoading(false)
+    }
+  }
+
+  const loadCohorts = async () => {
+    const response = await apiClient.get('/cohorts')
+    setCohorts(response.data)
+  }
+
+  const loadGraduationMatrix = async () => {
+    setGraduationMatrixLoading(true)
+    try {
+      const response = await apiClient.get('/students/graduation-matrix')
+      setGraduationMatrix(response.data)
+    } finally {
+      setGraduationMatrixLoading(false)
+    }
+  }
+
+  const loadGraduationSets = async () => {
+    try {
+      const response = await apiClient.get('/graduation-sets')
+      setGraduationSets(Array.isArray(response.data) ? response.data : [])
+    } catch { /* silent — sets list is non-critical on load */ }
+  }
+
+  const loadBatches = async (courseId) => {
+    if (!courseId) {
+      setBatches([])
+      setSelectedBatchId('')
+      setBatchStudents([])
+      return []
+    }
+
+    const response = await apiClient.get(`/batches?courseId=${courseId}`)
+    setBatches(response.data)
+    if (!response.data.length) {
+      setSelectedBatchId('')
+      setBatchStudents([])
+      return []
+    }
+
+    setSelectedBatchId((prev) => {
+      const exists = response.data.some((batch) => String(batch.id) === String(prev))
+      return exists ? prev : String(response.data[0].id)
+    })
+
+    return response.data
+  }
+
+  const loadBatchStudents = async (batchId) => {
+    if (!batchId) {
+      setBatchStudents([])
+      return
+    }
+
+    const response = await apiClient.get(`/enrollments/batch/${batchId}`)
+    setBatchStudents(response.data)
+  }
+
+  const toLocalInputValue = toLocalInput
+  const defaultLiveSchedule = buildDefaultLiveSchedule
+
+  const loadLiveClassSchedule = async (courseId) => {
+    if (!courseId) {
+      setLiveClassSchedule(buildDefaultLiveSchedule())
+      return
+    }
+    try {
+      const res = await apiClient.get(`/attendance/course/${courseId}/live-classes`)
+      const rows = Array.isArray(res.data) ? res.data : []
+      const byNum = new Map(rows.map((r) => [Number(r.class_number), r]))
+      const merged = Array.from({ length: 6 }, (_, i) => {
+        const n = i + 1
+        const row = byNum.get(n)
+        return {
+          class_number: n,
+          class_mode: row?.class_mode || 'online',
+          start_at: toLocalInput(row?.start_at),
+          end_at: toLocalInput(row?.end_at),
+          zoom_meeting_number: row?.zoom_meeting_number || '',
+          zoom_passcode: row?.zoom_passcode || '',
+        }
+      })
+      setLiveClassSchedule(merged)
+    } catch {
+      setLiveClassSchedule(buildDefaultLiveSchedule())
+    }
+  }
+
+  const saveLiveClassSchedule = async () => {
+    if (!selectedCourseId) return
+    setLiveScheduleSaving(true)
+    try {
+      const classes = liveClassSchedule.map((item) => ({
+        class_number: Number(item.class_number),
+        class_mode: item.class_mode || 'physical',
+        start_at: item.start_at ? new Date(item.start_at).toISOString() : null,
+        end_at: item.end_at ? new Date(item.end_at).toISOString() : null,
+        zoom_meeting_number: item.class_mode === 'online' ? (item.zoom_meeting_number || null) : null,
+        zoom_passcode: item.class_mode === 'online' ? (item.zoom_passcode || null) : null,
+      }))
+      await apiClient.put(`/attendance/course/${selectedCourseId}/live-classes`, { classes })
+      await loadLiveClassSchedule(selectedCourseId)
+      notify('Live class schedule saved')
+    } catch (error) {
+      notify(error?.response?.data?.message || 'Failed to save schedule')
+    } finally {
+      setLiveScheduleSaving(false)
+    }
+  }
+
+  const updateLiveScheduleItem = (classNumber, patch) => {
+    setLiveClassSchedule((prev) =>
+      (prev.length ? prev : buildDefaultLiveSchedule()).map((item) =>
+        Number(item.class_number) === Number(classNumber) ? { ...item, ...patch } : item
+      )
+    )
+  }
+
+  const prefillLiveFormFromSchedule = (classNumber = selectedClassNumber) => {
+    const item = (liveClassSchedule.length ? liveClassSchedule : buildDefaultLiveSchedule()).find(
+      (s) => Number(s.class_number) === Number(classNumber)
+    )
+    if (!item) return
+    setLiveClassMode(item.class_mode || 'online')
+    setLiveClassStart(item.start_at || '')
+    setLiveClassEnd(item.end_at || '')
+    setLiveMeetingNumber(item.zoom_meeting_number || '')
+    setLivePasscode(item.zoom_passcode || '')
+  }
+
+  useEffect(() => {
+    if (showLiveClassDrawer && selectedCourseId) {
+      loadLiveClassSchedule(selectedCourseId)
+    }
+  }, [showLiveClassDrawer])
+
+  useEffect(() => {
+    if (showLiveClassDrawer) {
+      prefillLiveFormFromSchedule(selectedClassNumber)
+    }
+  }, [selectedClassNumber, showLiveClassDrawer, liveClassSchedule])
+
+  const loadCourseScopedData = async (courseId, classNumber = selectedClassNumber) => {
+    if (!courseId) {
+      setCourseStudents([])
+      setAttendanceStatus({ activeSession: null, attendeeCount: 0 })
+      setAttendanceHistory([])
+      setAttendanceRoster([])
+      setAttendanceSummary([])
+      setCourseResults([])
+      setEligibleStudents([])
+      setCourseAllEnrollments([])
+      return
+    }
+
+    const [studentsRes, statusRes, rosterRes, historyRes, summaryRes, resultsRes, eligibleRes, allEnrollRes] = await Promise.all([
+      apiClient.get(`/courses/${courseId}/students`),
+      apiClient.get(`/attendance/course/${courseId}/status?classNumber=${classNumber}`),
+      apiClient.get(`/attendance/course/${courseId}/roster?classNumber=${classNumber}`),
+      apiClient.get(`/attendance/course/${courseId}/history`),
+      apiClient.get(`/attendance/course/${courseId}/students-summary`),
+      apiClient.get(`/results/course/${courseId}`),
+      apiClient.get(`/assignments/eligible/${courseId}`),
+      apiClient.get(`/courses/${courseId}/enrollments`),
+    ])
+
+    setCourseStudents(studentsRes.data)
+    const status = statusRes.data || {}
+    const active = status.activeSession || null
+    const live = status.live || null
+    setAttendanceStatus({
+      activeSession: active,
+      attendanceSession: active,
+      sessionId: active?.id ?? status.sessionId ?? null,
+      attendanceSessionId: active?.id ?? null,
+      isLive: Boolean(live?.isLive || (active?.is_active && Boolean(active?.end_time && new Date(active.end_time).getTime() >= Date.now()))),
+      lmsPresent: Number(live?.lms_present_count || 0),
+      classNumber: active?.class_number ?? status.classNumber ?? null,
+      startTime: active?.start_time ?? status.startTime ?? null,
+      endTime: active?.end_time ?? status.endTime ?? null,
+      mode: active?.class_mode ?? status.mode ?? null,
+      meetLink: active?.meet_link ?? status.meetLink ?? null,
+      zoomMeetingNumber: active?.zoom_meeting_number ?? status.zoomMeetingNumber ?? null,
+      zoomPasscode: active?.zoom_passcode ?? status.zoomPasscode ?? null,
+      meetingRole: 'participant',
+      present: Number(status.attendeeCount || 0),
+      lmsPresent: Number(live?.lms_present_count || 0),
+      active: Boolean(active),
+      sessionId: active?.id || null,
+      end_time: active?.end_time || null,
+    })
+    setAttendanceRoster(rosterRes.data.roster)
+    setAttendanceHistory(historyRes.data)
+    setAttendanceSummary(summaryRes.data)
+    setCourseResults(resultsRes.data)
+    setEligibleStudents(eligibleRes.data)
+    setCourseAllEnrollments(allEnrollRes.data)
+  }
+
+  const selectedCourse = useMemo(
+    () => courses.find((course) => String(course.id) === String(selectedCourseId)),
+    [courses, selectedCourseId]
+  )
+
+  useEffect(() => {
+    loadCourses()
+    loadAllStudents()
+    loadGraduationMatrix()
+    loadGraduationSets()
+    loadCohorts()
+    loadLecturers()
+    loadSchoolInfo()
+  }, [user?.id])
+
+  useEffect(() => {
+    if (!selectedCourseId) {
+      setLiveClassSchedule(buildDefaultLiveSchedule())
+      return
+    }
+
+    loadCourseScopedData(selectedCourseId, selectedClassNumber)
+    loadBatches(selectedCourseId)
+    loadLiveClassSchedule(selectedCourseId)
+    const interval = setInterval(() => loadCourseScopedData(selectedCourseId, selectedClassNumber), 5000)
+
+    return () => clearInterval(interval)
+  }, [selectedCourseId, selectedClassNumber])
+
+  useEffect(() => {
+    if (!selectedBatchId) {
+      setBatchStudents([])
+      return
+    }
+
+    loadBatchStudents(selectedBatchId)
+  }, [selectedBatchId])
+
+  useEffect(() => {
+    if (!selectedCourse) {
+      setSelectedClassNumber('1')
+      return
+    }
+
+    const maxClass = Math.max(1, Number(selectedCourse.duration_weeks || 1))
+    if (Number(selectedClassNumber) > maxClass) {
+      setSelectedClassNumber('1')
+    }
+  }, [selectedCourse?.id, selectedCourse?.duration_weeks])
+
+  useEffect(() => {
+    if (!selectedCourse) return
+    if (selectedResultType === 'Assignment' && !selectedCourse.has_assignment) {
+      setSelectedResultType('Final')
+    }
+    if (selectedResultType === 'Exam' && !selectedCourse.has_exam) {
+      setSelectedResultType('Final')
+    }
+  }, [selectedCourse, selectedResultType])
+
+  // Load plan items for the timeline tab based on calendarYear
+  useEffect(() => {
+    if (coursesTab !== 'timeline') return
+    let cancelled = false
+    const doLoad = async () => {
+      setTimelinePlanLoading(true)
+      try {
+        let allPlans = plans
+        if (!allPlans.length) {
+          const res = await apiClient.get('/course-plans')
+          if (cancelled) return
+          setPlans(res.data)
+          allPlans = res.data
+        }
+        const match = allPlans.find((p) => Number(p.year) === calendarYear)
+        if (!match) {
+          if (!cancelled) setTimelinePlanItems([])
+          return
+        }
+        const res = await apiClient.get(`/course-plans/${match.id}`)
+        if (!cancelled) setTimelinePlanItems(res.data.items || [])
+      } catch { /* silently ignore */ }
+      finally { if (!cancelled) setTimelinePlanLoading(false) }
+    }
+    doLoad()
+    return () => { cancelled = true }
+  }, [coursesTab, calendarYear])
+
+  const classOptions = useMemo(() => {
+    const totalClasses = Math.max(1, Number(selectedCourse?.duration_weeks || 1))
+    return Array.from({ length: totalClasses }, (_, index) => index + 1)
+  }, [selectedCourse?.duration_weeks])
+
+
+  const enrolledIds = useMemo(
+    () => new Set(batchStudents.map((student) => Number(student.student_id))),
+    [batchStudents]
+  )
+
+  const filteredStudents = useMemo(() => {
+    let result = allStudents
+
+    if (studentCohortFilter) {
+      result = result.filter((student) => String(student.cohort_id || '') === studentCohortFilter)
+    }
+
+    if (studentStatusFilter === 'current') {
+      result = result.filter((student) => !['Graduated', 'Alumni'].includes(student.status))
+    } else if (studentStatusFilter !== 'all') {
+      result = result.filter((student) => student.status === studentStatusFilter)
+    }
+
+    // Column/global search is handled by DataTable — keep only toolbar filters here
+    return result
+  }, [allStudents, studentCohortFilter, studentStatusFilter])
+
+  const filteredGraduationStudents = useMemo(() => {
+    const query = graduationSearch.trim().toLowerCase()
+    let rows = graduationMatrix.students || []
+
+    if (graduationStatusFilter !== 'all') {
+      rows = rows.filter((student) => student.status === graduationStatusFilter)
+    }
+
+    if (graduationCohortFilter) {
+      rows = rows.filter((student) => String(student.cohort_id || '') === graduationCohortFilter)
+    }
+
+    if (query) {
+      rows = rows.filter(
+        (student) =>
+          student.full_name.toLowerCase().includes(query) ||
+          student.email.toLowerCase().includes(query) ||
+          student.matric_no.toLowerCase().includes(query)
+      )
+    }
+
+    const sorted = [...rows]
+    if (graduationSortBy === 'name') {
+      sorted.sort((a, b) => a.full_name.localeCompare(b.full_name))
+    } else if (graduationSortBy === 'status') {
+      sorted.sort((a, b) => a.status.localeCompare(b.status) || b.completion_pct - a.completion_pct)
+    } else {
+      sorted.sort((a, b) => b.completion_pct - a.completion_pct || a.full_name.localeCompare(b.full_name))
+    }
+    return sorted
+  }, [graduationMatrix.students, graduationSearch, graduationSortBy, graduationStatusFilter, graduationCohortFilter])
+
+  const graduationStatusCounts = useMemo(() => {
+    const counts = { total: graduationMatrix.students?.length || 0, Graduating: 0, Graduated: 0, Alumni: 0 }
+    for (const student of graduationMatrix.students || []) {
+      if (student.status === 'Graduating') counts.Graduating += 1
+      if (student.status === 'Graduated') counts.Graduated += 1
+      if (student.status === 'Alumni') counts.Alumni += 1
+    }
+    return counts
+  }, [graduationMatrix.students])
+
+  const gradReportStats = useMemo(() => ({
+    graduates: filteredGraduationStudents.length,
+    totalCourses: graduationMatrix.courses?.length || 0,
+    coursesPassed: filteredGraduationStudents.reduce((sum, student) => sum + (student.passed || 0), 0),
+  }), [filteredGraduationStudents, graduationMatrix.courses])
+
+  const gradReportFilterSummary = useMemo(() => {
+    const parts = []
+    parts.push(graduationStatusFilter && graduationStatusFilter !== 'all' ? graduationStatusFilter : 'All students')
+    if (graduationCohortFilter) {
+      parts.push(cohorts.find((cohort) => String(cohort.id) === graduationCohortFilter)?.name || 'Selected batch')
+    }
+    if (graduationSearch.trim()) parts.push(`Search: “${graduationSearch.trim()}”`)
+    return parts.join(' · ')
+  }, [graduationStatusFilter, graduationCohortFilter, graduationSearch, cohorts])
+
+  const setEditorCourseOptions = useMemo(() => {
+    if (!setEditor) return []
+    const query = (setEditor.searchCourses || '').trim().toLowerCase()
+    if (!query) return courses
+    return courses.filter((course) =>
+      String(course.title || '').toLowerCase().includes(query) ||
+      String(course.course_code || '').toLowerCase().includes(query)
+    )
+  }, [setEditor, courses])
+
+  const setEditorStudentOptions = useMemo(() => {
+    if (!setEditor) return []
+    const query = (setEditor.studentSearch || '').trim().toLowerCase()
+    const selectedIds = new Set(setEditor.studentIds.map(Number))
+    let rows = allStudents.filter((student) => !selectedIds.has(Number(student.id)))
+    if (setEditor.studentStatusFilter) {
+      rows = rows.filter((student) => student.status === setEditor.studentStatusFilter)
+    }
+    if (query) {
+      rows = rows.filter(
+        (student) =>
+          String(student.full_name || '').toLowerCase().includes(query) ||
+          String(student.matric_no || '').toLowerCase().includes(query)
+      )
+    }
+    return [...rows].sort((a, b) => {
+      const aGraduating = a.status === 'Graduating' ? 0 : 1
+      const bGraduating = b.status === 'Graduating' ? 0 : 1
+      return aGraduating - bGraduating || String(a.full_name || '').localeCompare(String(b.full_name || ''))
+    })
+  }, [setEditor, allStudents])
+
+  const setReportDataStats = useMemo(() => {
+    const members = setReportData?.members || []
+    return {
+      members: members.length,
+      courses: setReportData?.courses?.length || 0,
+      totalPasses: members.reduce((sum, member) => sum + (Number(member.passed) || 0), 0),
+    }
+  }, [setReportData])
+
+  const currentCourseResultMap = useMemo(() => {
+    const map = new Map()
+    for (const row of courseResults) {
+      if ((row.result_type || 'Final') === selectedResultType) {
+        map.set(Number(row.student_id), row)
+      }
+    }
+    return map
+  }, [courseResults, selectedResultType])
+
+  const sortedCourseStudentsForResults = useMemo(() => {
+    const clone = [...courseStudents]
+    if (resultSortBy === 'score') {
+      clone.sort((a, b) => {
+        const aScore = Number(currentCourseResultMap.get(Number(a.student_id))?.score ?? -1)
+        const bScore = Number(currentCourseResultMap.get(Number(b.student_id))?.score ?? -1)
+        return bScore - aScore
+      })
+    } else if (resultSortBy === 'status') {
+      clone.sort((a, b) => {
+        const aStatus = currentCourseResultMap.get(Number(a.student_id))?.status || ''
+        const bStatus = currentCourseResultMap.get(Number(b.student_id))?.status || ''
+        return aStatus.localeCompare(bStatus)
+      })
+    } else {
+      clone.sort((a, b) => a.full_name.localeCompare(b.full_name))
+    }
+    return clone
+  }, [courseStudents, resultSortBy, currentCourseResultMap])
+
+  const studentGraduationProgress = useMemo(() => {
+    if (!selectedStudent || !graduationMatrix.courses?.length) return null
+    const enrollmentByCourse = {}
+    for (const enrollment of studentHistory.enrollments) {
+      enrollmentByCourse[enrollment.course_id] = enrollment
+    }
+    const passed = []
+    const failed = []
+    const active = []
+    const notStarted = []
+    for (const course of graduationMatrix.courses) {
+      const enrollment = enrollmentByCourse[course.id]
+      if (!enrollment) {
+        notStarted.push(course)
+      } else if (enrollment.result_status === 'Pass') {
+        passed.push({ ...course, enrollment })
+      } else if (enrollment.result_status === 'Fail') {
+        failed.push({ ...course, enrollment })
+      } else {
+        active.push({ ...course, enrollment })
+      }
+    }
+    return { passed, failed, active, notStarted, total: graduationMatrix.courses.length }
+  }, [selectedStudent, studentHistory.enrollments, graduationMatrix.courses])
+
+  const suggestedCourseEndDate = useMemo(
+    () => suggestCourseEndDate(courseForm.startDate, courseForm.durationWeeks, courseForm.classDay),
+    [courseForm.startDate, courseForm.durationWeeks, courseForm.classDay]
+  )
+
+  const loadReports = async () => {
+    setReportLoading(true)
+    try {
+      const [general, attendance] = await Promise.all([
+        apiClient.get('/reports/general', { params: reportFilters }),
+        apiClient.get('/reports/attendance', { params: reportFilters }),
+      ])
+      setReportStats(general.data)
+      setAttendanceReport(attendance.data)
+    } catch (error) {
+      console.error('Failed to load reports:', error)
+    } finally {
+      setReportLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    const next = {}
+    for (const row of courseResults) {
+      if ((row.result_type || 'Final') !== selectedResultType) continue
+      next[row.student_id] = {
+        score: String(row.score ?? ''),
+        status: row.status || 'Pass',
+      }
+    }
+    setResultRowEdits(next)
+  }, [courseResults, selectedResultType])
+
+  useEffect(() => {
+    if (section === 'forms') {
+      loadForms()
+      apiClient.get('/batches').then(res => setBatches(res.data)).catch(() => {})
+    }
+    if (section === 'students') {
+      loadProspectiveStudents()
+    }
+    if (section === 'reports') {
+      loadReports()
+    }
+    if (section === 'settings') {
+      loadSchoolInfo()
+      loadForms()
+    }
+    if (section === 'marking') {
+      setMarkingLoading(true)
+      setMarkingDetail(null)
+      apiClient.get('/exams/marking')
+        .then((res) => setMarkingExams(res.data || []))
+        .catch(() => setMarkingExams([]))
+        .finally(() => setMarkingLoading(false))
+    }
+  }, [section, user?.role, reportFilters])
+
+  useEffect(() => {
+    if (section !== 'settings') return
+    if (settingsTab === 'school') loadSchoolInfo()
+    if (settingsTab === 'integrations') {
+      loadForms()
+      if (integrationsSubTab === 'website' && !forms.length) loadForms()
+    }
+  }, [settingsTab, integrationsSubTab])
+
+  useEffect(() => {
+    if (section === 'assignments' && selectedCourseId) {
+      loadExams(selectedCourseId)
+      loadExamEligible(selectedCourseId)
+    }
+  }, [section, selectedCourseId])
+
+  const createCourse = async (event) => {
+    event.preventDefault()
+    try {
+      await apiClient.post('/courses', {
+        ...courseForm,
+        lecturerId: user.id,
+      })
+      setCourseForm({ title: '', courseCode: '', lecturerName: '', durationWeeks: 6, minAttendanceRequired: 4, hasAssignment: false, hasExam: false })
+      await loadCourses()
+      notify('Course created successfully')
+    } catch (error) {
+      notify(error?.response?.data?.message || 'Unable to create course')
+    }
+  }
+
+  const createStudent = async (event) => {
+    event.preventDefault()
+    try {
+      await apiClient.post('/students', {
+        fullName: studentForm.fullName,
+        email: studentForm.email,
+        phone: studentForm.phone,
+        matricNo: studentForm.matricNo,
+        comments: studentForm.comments,
+        status: studentForm.status,
+        cohortId: studentForm.cohortId ? Number(studentForm.cohortId) : undefined,
+        ...(studentForm.password ? { password: studentForm.password } : {}),
+      })
+
+      setStudentForm({
+        fullName: '',
+        email: '',
+        phone: '',
+        matricNo: '',
+        comments: '',
+        status: 'Prospective',
+        cohortId: '',
+        password: '',
+      })
+      await Promise.all([loadAllStudents(), loadGraduationMatrix()])
+      notify('Student created successfully')
+    } catch (error) {
+      notify(error?.response?.data?.message || 'Unable to create student')
+    }
+  }
+
+  const createStudentBatch = async (event) => {
+    event.preventDefault()
+    if (!cohortForm.name.trim() || !cohortForm.startDate || !cohortForm.endDate) {
+      notify('Batch name, start date, and end date are required')
+      return
+    }
+    try {
+      await apiClient.post('/cohorts', {
+        name: cohortForm.name.trim(),
+        startDate: cohortForm.startDate,
+        endDate: cohortForm.endDate,
+      })
+      setCohortForm({ name: '', startDate: '', endDate: '' })
+      await loadCohorts()
+      notify('Student batch created')
+    } catch (error) {
+      notify(error?.response?.data?.message || 'Unable to create student batch')
+    }
+  }
+
+  const startEditCohort = (cohort) => {
+    setEditingCohortId(cohort.id)
+    setCohortEditForm({
+      name: cohort.name || '',
+      startDate: cohort.start_date || '',
+      endDate: cohort.end_date || '',
+      status: cohort.status || 'active',
+    })
+  }
+
+  const saveCohortEdit = async (cohortId) => {
+    try {
+      await apiClient.patch(`/cohorts/${cohortId}`, {
+        name: cohortEditForm.name,
+        startDate: cohortEditForm.startDate,
+        endDate: cohortEditForm.endDate,
+        status: cohortEditForm.status,
+      })
+      setEditingCohortId(null)
+      await loadCohorts()
+      notify('Batch updated')
+    } catch (error) {
+      notify(error?.response?.data?.message || 'Unable to update batch')
+    }
+  }
+
+  const moveCohortLocally = (dragId, dropId) => {
+    if (!dragId || !dropId || dragId === dropId) return
+    setCohorts((prev) => {
+      const list = [...prev]
+      const from = list.findIndex((item) => Number(item.id) === Number(dragId))
+      const to = list.findIndex((item) => Number(item.id) === Number(dropId))
+      if (from < 0 || to < 0) return prev
+      const [moved] = list.splice(from, 1)
+      list.splice(to, 0, moved)
+      return list
+    })
+  }
+
+  const persistCohortOrder = async () => {
+    try {
+      const orderedIds = cohorts.map((item) => item.id)
+      await apiClient.patch('/cohorts/reorder', { orderedIds })
+      await loadCohorts()
+      notify('Batch order saved')
+    } catch (error) {
+      notify(error?.response?.data?.message || 'Unable to save batch order')
+    }
+  }
+
+  const deleteCohortSafely = async (cohort) => {
+    const confirmed = await dialogConfirm(
+      `This batch can't be deleted while students remain in it. Continuing will remove "${cohort.name}" and unassign its students.`,
+      { title: `Delete batch "${cohort.name}"?`, confirmLabel: 'Delete' }
+    )
+    if (!confirmed) return
+
+    try {
+      await apiClient.delete(`/cohorts/${cohort.id}`)
+      if (editingCohortId === cohort.id) {
+        setEditingCohortId(null)
+      }
+      await loadCohorts()
+      notify('Batch deleted')
+    } catch (error) {
+      if (error?.response?.status === 409) {
+        const forceConfirmed = await dialogConfirm(
+          'The batch still has students assigned. Remove students from this batch and delete anyway?',
+          { title: `Delete batch "${cohort.name}"?`, confirmLabel: 'Delete anyway' }
+        )
+        if (!forceConfirmed) return
+        await apiClient.delete(`/cohorts/${cohort.id}?force=true`)
+        if (editingCohortId === cohort.id) {
+          setEditingCohortId(null)
+        }
+        await loadCohorts()
+        notify('Batch deleted and students unassigned')
+        return
+      }
+      notify(error?.response?.data?.message || 'Unable to delete batch')
+    }
+  }
+
+  const setCourseAsCurrent = async (courseId) => {
+    await apiClient.patch(`/courses/${courseId}/set-current`)
+    await loadCourses()
+    notify('Current course updated')
+  }
+
+  const deleteCourse = async (courseId, courseTitle) => {
+    if (!(await dialogConfirm(
+      `Deleting "${courseTitle}" also removes all its enrollments, attendance and results. This cannot be undone.`,
+      { title: 'Delete course', confirmLabel: 'Delete' }
+    ))) return
+    try {
+      await apiClient.delete(`/courses/${courseId}`)
+      await loadCourses()
+      if (String(selectedCourseId) === String(courseId)) setSelectedCourseId('')
+      notify('Course deleted')
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to delete course')
+    }
+  }
+
+  const exportStudentList = async () => {
+    const response = await apiClient.get('/students/export', { responseType: 'blob' })
+    const href = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = href
+    link.setAttribute('download', 'students.xlsx')
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(href)
+  }
+
+  const downloadGraduationReport = async () => {
+    try {
+      const params = {}
+      if (graduationStatusFilter && graduationStatusFilter !== 'all') params.status = graduationStatusFilter
+      if (graduationCohortFilter) params.cohortId = graduationCohortFilter
+      if (graduationSearch.trim()) params.q = graduationSearch.trim()
+      const response = await apiClient.get('/students/graduation-report', { params, responseType: 'blob' })
+      const href = URL.createObjectURL(response.data)
+      const link = document.createElement('a')
+      link.href = href
+      link.setAttribute('download', 'graduation-report.xlsx')
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(href)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to download graduation report')
+    }
+  }
+
+  const downloadGraduationReportPdf = async () => {
+    try {
+      const params = {}
+      if (graduationStatusFilter && graduationStatusFilter !== 'all') params.status = graduationStatusFilter
+      if (graduationCohortFilter) params.cohortId = graduationCohortFilter
+      if (graduationSearch.trim()) params.q = graduationSearch.trim()
+      const response = await apiClient.get('/students/graduation-report.pdf', { params, responseType: 'blob' })
+      const href = URL.createObjectURL(response.data)
+      const link = document.createElement('a')
+      link.href = href
+      link.setAttribute('download', 'graduation-report.pdf')
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(href)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to download graduation report')
+    }
+  }
+
+  const openSetReport = async (row) => {
+    setShowSetReport(row)
+    setSetReportData(null)
+    setSetReportDataLoading(true)
+    try {
+      const response = await apiClient.get(`/graduation-sets/${row.id}`)
+      setSetReportData(response.data)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to load graduation set report')
+      setShowSetReport(null)
+    } finally {
+      setSetReportDataLoading(false)
+    }
+  }
+
+  const downloadSetReportFile = async (ext) => {
+    if (!showSetReport) return
+    try {
+      const response = await apiClient.get(`/graduation-sets/${showSetReport.id}/report.${ext}`, { responseType: 'blob' })
+      const baseName = String(showSetReport.name || 'graduating-set').replace(/[\\/:*?"<>|]+/g, '-').trim() || 'graduating-set'
+      const href = URL.createObjectURL(response.data)
+      const link = document.createElement('a')
+      link.href = href
+      link.setAttribute('download', `${baseName}-graduation-report.${ext === 'pdf' ? 'pdf' : 'xlsx'}`)
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(href)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to download graduation set report')
+    }
+  }
+
+  const openSetEditorCreate = () => {
+    setSetEditor({
+      mode: 'create',
+      id: undefined,
+      name: '',
+      description: '',
+      graduation_date: '',
+      status: 'active',
+      courseIds: [],
+      studentIds: [],
+      members: [],
+      searchCourses: '',
+      studentSearch: '',
+      studentStatusFilter: '',
+      initial: null,
+    })
+  }
+
+  const openSetEditorEdit = async (row) => {
+    const base = {
+      mode: 'edit',
+      id: row.id,
+      name: row.name || '',
+      description: row.description || '',
+      graduation_date: row.graduation_date || '',
+      status: row.status || 'active',
+      courseIds: [],
+      studentIds: [],
+      members: [],
+      searchCourses: '',
+      studentSearch: '',
+      studentStatusFilter: '',
+      initial: {
+        name: row.name || '',
+        description: row.description || '',
+        graduation_date: row.graduation_date || '',
+        status: row.status || 'active',
+      },
+    }
+    setSetEditor(base)
+    try {
+      const response = await apiClient.get(`/graduation-sets/${row.id}`)
+      const detail = response.data
+      setSetEditor((prev) => (
+        prev && prev.mode === 'edit' && String(prev.id) === String(row.id)
+          ? {
+              ...prev,
+              courseIds: (detail.courses || []).map((course) => Number(course.id)),
+              studentIds: (detail.members || []).map((member) => Number(member.id)),
+              members: detail.members || [],
+            }
+          : prev
+      ))
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to load graduating set details')
+    }
+  }
+
+  const refreshSetEditorMembership = async (setId) => {
+    const response = await apiClient.get(`/graduation-sets/${setId}`)
+    const detail = response.data
+    setSetEditor((prev) => (
+      prev && prev.mode === 'edit' && String(prev.id) === String(setId)
+        ? {
+            ...prev,
+            courseIds: (detail.courses || []).map((course) => Number(course.id)),
+            studentIds: (detail.members || []).map((member) => Number(member.id)),
+            members: detail.members || [],
+          }
+        : prev
+    ))
+  }
+
+  const toggleSetCourse = async (course) => {
+    if (!setEditor || setEditorSaving) return
+    const courseId = Number(course.id)
+    const selected = setEditor.courseIds.includes(courseId)
+    if (setEditor.mode === 'create') {
+      setSetEditor((prev) => ({
+        ...prev,
+        courseIds: selected ? prev.courseIds.filter((id) => id !== courseId) : [...prev.courseIds, courseId],
+      }))
+      return
+    }
+    setSetEditorSaving(true)
+    try {
+      if (selected) {
+        await apiClient.delete(`/graduation-sets/${setEditor.id}/courses/${courseId}`)
+        setSetEditor((prev) => ({ ...prev, courseIds: prev.courseIds.filter((id) => id !== courseId) }))
+      } else {
+        await apiClient.post(`/graduation-sets/${setEditor.id}/courses`, { courseIds: [courseId] })
+        setSetEditor((prev) => ({ ...prev, courseIds: [...prev.courseIds, courseId] }))
+      }
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to update set courses')
+    } finally {
+      setSetEditorSaving(false)
+    }
+  }
+
+  const addSetStudent = async (student) => {
+    if (!setEditor || setEditorSaving) return
+    const studentId = Number(student.id)
+    if (setEditor.studentIds.includes(studentId)) return
+    if (setEditor.mode === 'create') {
+      setSetEditor((prev) => ({
+        ...prev,
+        studentIds: [...prev.studentIds, studentId],
+        members: [...prev.members, { ...student }],
+      }))
+      return
+    }
+    setSetEditorSaving(true)
+    try {
+      await apiClient.post(`/graduation-sets/${setEditor.id}/members`, { studentIds: [studentId] })
+      await refreshSetEditorMembership(setEditor.id)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to add student to set')
+    } finally {
+      setSetEditorSaving(false)
+    }
+  }
+
+  const removeSetStudent = async (studentId) => {
+    if (!setEditor || setEditorSaving) return
+    const id = Number(studentId)
+    if (setEditor.mode === 'create') {
+      setSetEditor((prev) => ({
+        ...prev,
+        studentIds: prev.studentIds.filter((studentId) => studentId !== id),
+        members: prev.members.filter((member) => Number(member.id) !== id),
+      }))
+      return
+    }
+    setSetEditorSaving(true)
+    try {
+      await apiClient.delete(`/graduation-sets/${setEditor.id}/members/${id}`)
+      await refreshSetEditorMembership(setEditor.id)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to remove student from set')
+    } finally {
+      setSetEditorSaving(false)
+    }
+  }
+
+  const saveSetEditor = async () => {
+    if (!setEditor || setEditorSaving) return
+    if (!setEditor.name.trim()) {
+      notify('Set name is required')
+      return
+    }
+    setSetEditorSaving(true)
+    try {
+      if (setEditor.mode === 'create') {
+        const payload = {
+          name: setEditor.name.trim(),
+          description: setEditor.description?.trim() || undefined,
+          graduation_date: setEditor.graduation_date || undefined,
+          courseIds: setEditor.courseIds,
+          studentIds: setEditor.studentIds,
+        }
+        const response = await apiClient.post('/graduation-sets', payload)
+        notify('Graduating set created')
+        await loadGraduationSets()
+        const created = response.data
+        if (created?.id) {
+          await openSetEditorEdit({
+            id: created.id,
+            name: created.name || payload.name,
+            description: created.description ?? payload.description ?? '',
+            graduation_date: created.graduation_date || payload.graduation_date || '',
+            status: created.status || 'active',
+          })
+        } else {
+          setSetEditor(null)
+        }
+      } else {
+        const meta = {
+          name: setEditor.name.trim(),
+          description: setEditor.description || '',
+          graduation_date: setEditor.graduation_date || '',
+          status: setEditor.status || 'active',
+        }
+        const initial = setEditor.initial || meta
+        const changed = ['name', 'description', 'graduation_date', 'status']
+          .some((key) => String(meta[key] ?? '') !== String(initial[key] ?? ''))
+        if (changed) {
+          await apiClient.patch(`/graduation-sets/${setEditor.id}`, meta)
+          notify('Graduating set updated')
+          await loadGraduationSets()
+        }
+        setSetEditor(null)
+      }
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to save graduating set')
+    } finally {
+      setSetEditorSaving(false)
+    }
+  }
+
+  const completeSet = async (row) => {
+    if (!(await dialogConfirm(
+      `Students who passed every set course will be graduated.`,
+      { title: `Mark "${row.name}" as completed?`, confirmLabel: 'Mark completed', tone: 'primary' }
+    ))) return
+    try {
+      const response = await apiClient.post(`/graduation-sets/${row.id}/complete`)
+      const graduated = response.data?.graduated?.length || 0
+      const remaining = response.data?.remaining?.length || 0
+      notify(`Set completed: ${graduated} graduated, ${remaining} remaining`)
+      await Promise.all([loadGraduationSets(), loadGraduationMatrix()])
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to complete graduating set')
+    }
+  }
+
+  const deleteSet = async (row) => {
+    if (!(await dialogConfirm(`"${row.name}" will be permanently deleted.`, { title: 'Delete graduating set', confirmLabel: 'Delete' }))) return
+    try {
+      await apiClient.delete(`/graduation-sets/${row.id}`)
+      notify('Graduating set deleted')
+      await loadGraduationSets()
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Unable to delete graduating set')
+    }
+  }
+
+  const uploadStudents = async () => {
+    if (!studentUploadFile) return
+    try {
+      const formData = new FormData()
+      formData.append('file', studentUploadFile)
+      const response = await apiClient.post('/students/upload', formData)
+      await Promise.all([loadAllStudents(), loadCourseScopedData(selectedCourseId), loadGraduationMatrix()])
+      notify(`Students uploaded: ${response.data.processed} processed`)
+      setStudentUploadFile(null)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Upload failed. Please try again.')
+    }
+  }
+
+  const uploadCourses = async () => {
+    if (!courseUploadFile) return
+    const formData = new FormData()
+    formData.append('file', courseUploadFile)
+    try {
+      const res = await apiClient.post('/courses/bulk-upload', formData)
+      await loadCourses()
+      setCourseUploadFile(null)
+      const errCount = res.data.errors?.length || 0
+      notify(`Courses uploaded: ${res.data.created} created${errCount ? `, ${errCount} skipped` : ''}`)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Course upload failed')
+    }
+  }
+
+  const downloadTemplate = async (type) => {
+    try {
+      const res = await apiClient.get(`/${type}/template`, { responseType: 'blob' })
+      const url = URL.createObjectURL(new Blob([res.data]))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${type}_template.xlsx`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      notify('Failed to download template')
+    }
+  }
+
+  const enrollStudent = async (studentId) => {
+    if (!selectedBatchId) {
+      notify('Select a batch first')
+      return
+    }
+
+    await apiClient.post('/enrollments', {
+      studentId,
+      batchId: Number(selectedBatchId),
+    })
+    await Promise.all([
+      loadCourseScopedData(selectedCourseId),
+      loadBatchStudents(selectedBatchId),
+      loadCourses(),
+      loadGraduationMatrix(),
+    ])
+    notify('Student enrolled to batch')
+  }
+
+  const openStudentPanel = async (student) => {
+    setSelectedStudent(student)
+    setStudentEditForm({ ...student })
+    setNewStatusInput('')
+    setStatusTransitionReason('')
+    setPanelStatusOpen(false)
+    setStudentTimeline([])
+    setLoadingStudentHistory(true)
+    try {
+      const [historyRes, timelineRes, nextStatusesRes, statusHistoryRes] = await Promise.allSettled([
+        apiClient.get(`/enrollments/student/${student.id}/history`),
+        apiClient.get(`/enrollments/student/${student.id}/timeline`),
+        apiClient.get(`/students/${student.id}/next-statuses`),
+        apiClient.get(`/students/${student.id}/status-history`),
+      ])
+      if (historyRes.status === 'fulfilled') {
+        setStudentHistory(historyRes.value.data)
+        const notesMap = {}
+        for (const enrollment of historyRes.value.data.enrollments || []) {
+          notesMap[enrollment.id] = enrollment.notes || ''
+        }
+        setEnrollmentNotesEdits(notesMap)
+      }
+      if (timelineRes.status === 'fulfilled') {
+        setStudentTimeline(timelineRes.value.data.timeline || [])
+      }
+      if (nextStatusesRes.status === 'fulfilled') {
+        setValidNextStatuses(nextStatusesRes.value.data.nextStatuses || [])
+      }
+      if (statusHistoryRes.status === 'fulfilled') {
+        setStatusHistory(statusHistoryRes.value.data || [])
+      }
+    } finally {
+      setLoadingStudentHistory(false)
+    }
+  }
+
+  const closeStudentPanel = () => {
+    setSelectedStudent(null)
+    setStudentEditForm(null)
+    setStudentHistory({ enrollments: [], activities: [] })
+    setStudentTimeline([])
+    setEnrollmentNotesEdits({})
+    setNewStatusInput('')
+    setValidNextStatuses([])
+    setStatusHistory([])
+    setStatusTransitionReason('')
+    setPanelStatusOpen(false)
+  }
+
+  const saveStudentEdit = async (event) => {
+    event.preventDefault()
+    if (!studentEditForm) return
+    await apiClient.put(`/students/${studentEditForm.id}`, {
+      fullName: studentEditForm.full_name,
+      email: studentEditForm.email,
+      phone: studentEditForm.phone,
+      status: studentEditForm.status,
+      matricNo: studentEditForm.matric_no,
+      comments: studentEditForm.comments,
+      cohortId: studentEditForm.cohort_id ? Number(studentEditForm.cohort_id) : null,
+    })
+    // If status changed, also call the lifecycle endpoint so email notifications fire
+    if (studentEditForm.status !== selectedStudent?.status) {
+      await apiClient.patch(`/students/${studentEditForm.id}/lifecycle-status`, {
+        status: studentEditForm.status,
+        reason: statusTransitionReason || null,
+      })
+    }
+    await Promise.all([loadAllStudents(), loadCourseScopedData(selectedCourseId)])
+    closeStudentPanel()
+    notify('Student updated')
+  }
+
+  const addStudentStatus = async () => {
+    if (!selectedStudent || !newStatusInput.trim()) return
+    await apiClient.post(`/students/${selectedStudent.id}/status`, {
+      statusName: newStatusInput.trim(),
+    })
+
+    const students = await loadAllStudents()
+    const refreshed = students.find((student) => student.id === selectedStudent.id)
+    if (refreshed) {
+      setSelectedStudent(refreshed)
+      setStudentEditForm({ ...refreshed })
+    }
+    setNewStatusInput('')
+    notify('Student status added')
+  }
+
+  const removeStudentStatus = async (statusId) => {
+    if (!selectedStudent) return
+    await apiClient.delete(`/students/${selectedStudent.id}/status/${statusId}`)
+
+    const students = await loadAllStudents()
+    const refreshed = students.find((student) => student.id === selectedStudent.id)
+    if (refreshed) {
+      setSelectedStudent(refreshed)
+      setStudentEditForm({ ...refreshed })
+    }
+    notify('Student status removed')
+  }
+
+  const uploadProfileImage = async () => {
+    if (!selectedStudent || !profileImageFile) return
+    setProfileImageUploading(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', profileImageFile)
+      const res = await apiClient.post(`/students/${selectedStudent.id}/photo`, formData)
+      const updated = { ...selectedStudent, profile_image_url: res.data.profileImageUrl }
+      setSelectedStudent(updated)
+      setStudentEditForm((prev) => ({ ...prev, profile_image_url: res.data.profileImageUrl }))
+      setAllStudents((prev) =>
+        prev.map((s) => (s.id === selectedStudent.id ? { ...s, profile_image_url: res.data.profileImageUrl } : s))
+      )
+      setProfileImageFile(null)
+      notify('Profile image uploaded')
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Upload failed')
+    } finally {
+      setProfileImageUploading(false)
+    }
+  }
+
+  const startAttendance = async () => {
+    if (!selectedCourseId) return
+
+    // If a live class is already active, show status instead of re-starting.
+    const activeRes = await apiClient.get(`/attendance/course/${selectedCourseId}/live-class`).catch(() => null)
+    const activeSession = activeRes?.data?.session
+    if (activeSession && activeSession.is_active) {
+      await loadCourseScopedData(selectedCourseId, selectedClassNumber)
+      notify(`Live class already active (class ${activeSession.class_number})`)
+      return
+    }
+
+    const mode = liveClassMode
+    const meetingNumber = liveMeetingNumber.trim()
+    if (mode === 'online' && !meetingNumber) {
+      notify('Enter a Zoom meeting number')
+      return
+    }
+
+    const startTime = attendanceForm.date && attendanceForm.startTime
+      ? new Date(`${attendanceForm.date}T${attendanceForm.startTime}`)
+      : (liveClassStart ? new Date(liveClassStart) : new Date())
+    const endTime = attendanceForm.date && attendanceForm.endTime
+      ? new Date(`${attendanceForm.date}T${attendanceForm.endTime}`)
+      : (liveClassEnd ? new Date(liveClassEnd) : new Date(startTime.getTime() + 3 * 60 * 60 * 1000))
+
+    if (Number.isNaN(startTime.getTime()) || Number.isNaN(endTime.getTime())) {
+      notify('Invalid date or time')
+      return
+    }
+    if (endTime <= startTime) {
+      notify('End time must be after start time')
+      return
+    }
+
+    await apiClient.post('/attendance/start', {
+      courseId: Number(selectedCourseId),
+      classNumber: Number(selectedClassNumber),
+      startTime: startTime.toISOString(),
+      endTime: endTime.toISOString(),
+      classMode: mode,
+      secondaryLecturerId: attendanceForm.secondaryLecturerId || null,
+      lecturerNotes: attendanceForm.lecturerNotes || '',
+      ...(mode === 'online' ? { zoomMeetingNumber: meetingNumber, zoomPasscode: livePasscode || null } : {}),
+    })
+
+    setAttendanceForm({ date: '', startTime: '', endTime: '', secondaryLecturerId: '', lecturerNotes: '' })
+    setLiveClassStart('')
+    setLiveClassEnd('')
+    setLiveMeetingNumber('')
+    setLivePasscode('')
+    await loadCourseScopedData(selectedCourseId, selectedClassNumber)
+    notify(`Attendance started for class ${Number(selectedClassNumber)} (${mode})`)
+  }
+
+  const closeAttendance = async () => {
+    await apiClient.post('/attendance/close', {
+      courseId: Number(selectedCourseId),
+      classNumber: Number(selectedClassNumber),
+    })
+    await loadCourseScopedData(selectedCourseId, selectedClassNumber)
+  }
+
+  const markStudentPresent = async (studentId) => {
+    await apiClient.post('/attendance/manual-mark', {
+      courseId: Number(selectedCourseId),
+      studentId,
+      classNumber: Number(selectedClassNumber),
+    })
+    await loadCourseScopedData(selectedCourseId, selectedClassNumber)
+  }
+
+  const openEditSession = async (session) => {
+    setEditSessionLoading(true)
+    try {
+      const res = await apiClient.get(`/attendance/session/${session.id}/roster`)
+      setEditingSession(res.data)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to load session roster')
+    } finally {
+      setEditSessionLoading(false)
+    }
+  }
+
+  const toggleSessionAttendance = async (sessionId, studentId) => {
+    try {
+      const res = await apiClient.patch(`/attendance/session/${sessionId}/toggle`, { studentId })
+      // Update the roster in state immediately (optimistic)
+      setEditingSession((prev) => ({
+        ...prev,
+        roster: prev.roster.map((r) =>
+          r.student_id === studentId ? { ...r, present: res.data.present } : r
+        ),
+      }))
+      // Refresh summary counts
+      await loadCourseScopedData(selectedCourseId, selectedClassNumber)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to update attendance')
+    }
+  }
+
+  const deleteSession = async () => {
+    if (!deleteSessionReason.trim()) {
+      notify('Please enter a reason before deleting')
+      return
+    }
+    try {
+      await apiClient.delete(`/attendance/session/${editingSession.session.id}`, {
+        data: { reason: deleteSessionReason.trim() },
+      })
+      setEditingSession(null)
+      setDeleteSessionReason('')
+      setShowDeleteSessionConfirm(false)
+      await loadCourseScopedData(selectedCourseId, selectedClassNumber)
+      notify('Attendance session deleted')
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to delete session')
+    }
+  }
+
+  const updateResultInline = async (studentId, score, status) => {
+    if (!selectedCourseId) {
+      notify('Select a course first')
+      return
+    }
+    if (!['Pass', 'Fail'].includes(status)) {
+      notify('Status must be Pass or Fail')
+      return
+    }
+    await apiClient.post('/results', {
+      courseId: Number(selectedCourseId),
+      studentId,
+      resultType: selectedResultType,
+      score: score !== '' && score !== null && score !== undefined ? Number(score) : undefined,
+      status,
+    })
+    await Promise.all([loadCourseScopedData(selectedCourseId), loadGraduationMatrix()])
+    notify('Result updated')
+  }
+
+  const downloadResultTemplate = async () => {
+    if (!selectedCourseId || !selectedBatchId) {
+      notify('Select course and batch first')
+      return
+    }
+    const response = await apiClient.get(
+      `/results/template?courseId=${selectedCourseId}&batchId=${selectedBatchId}`,
+      { responseType: 'blob' }
+    )
+    const href = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = href
+    link.setAttribute('download', `results-template-course-${selectedCourseId}-batch-${selectedBatchId}.csv`)
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(href)
+  }
+
+  const uploadResultsFile = async () => {
+    if (!resultUploadFile) {
+      notify('Select a file first')
+      return
+    }
+    if (!selectedCourseId || !selectedBatchId) {
+      notify('Select course and batch first')
+      return
+    }
+    const formData = new FormData()
+    formData.append('file', resultUploadFile)
+    formData.append('courseId', String(selectedCourseId))
+    formData.append('batchId', String(selectedBatchId))
+
+    const response = await apiClient.post('/results/bulk-upload', formData)
+    setResultUploadSummary(response.data)
+    await Promise.all([loadCourseScopedData(selectedCourseId), loadGraduationMatrix()])
+    notify(`Imported ${response.data.imported} result(s)`)
+  }
+
+  const updateResultRowField = (studentId, field, value) => {
+    setResultRowEdits((prev) => ({
+      ...prev,
+      [studentId]: {
+        score: prev[studentId]?.score ?? '',
+        status: prev[studentId]?.status ?? 'Pass',
+        [field]: value,
+      },
+    }))
+  }
+
+  const exportResultsCsv = () => {
+    apiClient
+      .get(`/results/course/${selectedCourseId}/export`, { responseType: 'blob' })
+      .then((response) => {
+        const href = URL.createObjectURL(response.data)
+        const link = document.createElement('a')
+        link.href = href
+        link.setAttribute('download', `course-${selectedCourseId}-results.csv`)
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        URL.revokeObjectURL(href)
+      })
+  }
+
+  const createAssignment = async (event) => {
+    event.preventDefault()
+    const formData = new FormData()
+    formData.append('courseId', String(selectedCourseId))
+    formData.append('title', assignmentForm.title)
+    formData.append('description', assignmentForm.description)
+    if (assignmentForm.dueDate) {
+      formData.append('dueDate', assignmentForm.dueDate)
+    }
+    if (assignmentForm.file) {
+      formData.append('file', assignmentForm.file)
+    }
+
+    await apiClient.post('/assignments', formData)
+    setAssignmentForm({ title: '', description: '', dueDate: '', file: null })
+    await loadCourseScopedData(selectedCourseId)
+    notify('Assignment sent to eligible students')
+  }
+
+  const loadExams = async (courseId) => {
+    if (!courseId) { setExams([]); return }
+    try {
+      setExamsLoading(true)
+      const res = await apiClient.get(`/exams/course/${courseId}`)
+      setExams(res.data)
+    } catch { setExams([]) }
+    finally { setExamsLoading(false) }
+  }
+
+  const loadExamEligible = async (courseId) => {
+    if (!courseId) { setExamEligible([]); return }
+    try {
+      const res = await apiClient.get(`/exams/eligible/${courseId}`)
+      setExamEligible(res.data)
+      setExamSelected(Object.fromEntries(res.data.map((s) => [s.id, true])))
+    } catch { setExamEligible([]) }
+  }
+
+  const blankMcqQuestion = () => ({
+    text: '',
+    options: [
+      { key: 'A', label: '' },
+      { key: 'B', label: '' },
+      { key: 'C', label: '' },
+      { key: 'D', label: '' },
+    ],
+    correctAnswer: 'A',
+  })
+
+  const createExam = async (event) => {
+    event.preventDefault()
+    if (!examForm.title.trim()) { notify('Exam title is required'); return }
+
+    let questions
+    if (examForm.examType === 'mcq') {
+      questions = examForm.questions
+        .map((q) => ({
+          text: (q.text || '').trim(),
+          options: (q.options || []).filter((o) => (o.label || '').trim()),
+          correctAnswer: q.correctAnswer || 'A',
+        }))
+        .filter((q) => q.text && q.options.length >= 2)
+      if (!questions.length) {
+        notify('Add at least one MCQ with 2+ options and a correct answer')
+        return
+      }
+      const bad = questions.find((q) => !q.options.some((o) => o.key === q.correctAnswer))
+      if (bad) {
+        notify('Each MCQ must have a correct answer matching one of its options')
+        return
+      }
+    } else if (examForm.examType === 'paper') {
+      questions = [] // paper exams have no preset questions
+    } else {
+      questions = examForm.questions.filter((q) => (q.text || '').trim()).map((q) => ({ text: q.text.trim() }))
+      if (!questions.length) {
+        notify('Add at least one exam question')
+        return
+      }
+    }
+
+    try {
+      const res = await apiClient.post('/exams', {
+        courseId: Number(selectedCourseId),
+        planId: examForm.planId ? Number(examForm.planId) : null,
+        title: examForm.title.trim(),
+        description: examForm.description.trim(),
+        dueDate: examForm.dueDate || null,
+        examType: examForm.examType,
+        durationMinutes: examForm.examType === 'mcq' && Number(examForm.durationMinutes) > 0
+          ? Number(examForm.durationMinutes)
+          : null,
+        resultsReleaseAt: examForm.resultsReleaseAt || null,
+        questions,
+      })
+      setExamForm({
+        title: '',
+        description: '',
+        dueDate: '',
+        examType: 'essay',
+        planId: '',
+        durationMinutes: '',
+        resultsReleaseAt: '',
+        questions: [{ text: '', options: [{ key: 'A', label: '' }, { key: 'B', label: '' }], correctAnswer: 'A' }],
+      })
+      await loadExams(selectedCourseId)
+      if (res.data?.take_url) {
+        notify('MCQ exam saved. Share the quiz link when you send it to students.')
+      } else {
+        notify('Exam saved')
+      }
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to save exam')
+    }
+  }
+
+  const openExamSubmissions = async (exam) => {
+    setExamSubmissionsView(exam)
+    setExamSubmissions([])
+    setExamSubmissionsLoading(true)
+    try {
+      const res = await apiClient.get(`/exams/${exam.id}/submissions`)
+      setExamSubmissions(res.data.submissions || [])
+    } catch {
+      setExamSubmissions([])
+      notify('Failed to load submissions')
+    } finally {
+      setExamSubmissionsLoading(false)
+    }
+  }
+
+  const sendMcqResultsNow = async () => {
+    if (!examSubmissionsView) return
+    setExamResultsSending(true)
+    try {
+      const res = await apiClient.post(`/exams/${examSubmissionsView.id}/send-results`, {})
+      notify(`Results emailed to ${res.data.sent} of ${res.data.total} student(s)`)
+      await openExamSubmissions(examSubmissionsView)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to send results')
+    } finally {
+      setExamResultsSending(false)
+    }
+  }
+
+  const openExamSend = (exam) => {
+    setExamSendTarget(exam)
+    setExamSendResult(null)
+  }
+
+  const sendExamNow = async () => {
+    if (!examSendTarget) return
+    setExamSending(true)
+    setExamSendResult(null)
+    const ids = examEligible.filter((s) => examSelected[s.id]).map((s) => s.id)
+    if (!ids.length) {
+      setExamSending(false)
+      notify('Select at least one student to send to')
+      return
+    }
+    try {
+      const res = await apiClient.post(`/exams/${examSendTarget.id}/send`, { studentIds: ids })
+      setExamSendResult(res.data)
+      notify(`Exam sent to ${res.data.sent} of ${res.data.total} student(s)`)
+      await loadExams(selectedCourseId)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to send exam')
+    } finally {
+      setExamSending(false)
+    }
+  }
+
+  const deleteExamItem = async (examId) => {
+    if (!(await dialogConfirm('The exam and its delivery records will be removed. Submissions are kept.', { title: 'Delete exam', confirmLabel: 'Delete' }))) return
+    try {
+      await apiClient.delete(`/exams/${examId}`)
+      await loadExams(selectedCourseId)
+      notify('Exam deleted')
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to delete exam')
+    }
+  }
+
+  // ── Marking portal ──────────────────────────────────────────────────
+  const openMarkingExam = async (exam) => {
+    setMarkingDetail(exam)
+    setMarkingSubmissions([])
+    setMarkingDetailLoading(true)
+    try {
+      const res = await apiClient.get(`/exams/${exam.id}/submissions`)
+      setMarkingSubmissions(res.data.submissions || [])
+      setMarkingQuestions(res.data.questions || [])
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to load submissions')
+    } finally {
+      setMarkingDetailLoading(false)
+    }
+  }
+
+  const openMarkModal = (sub, examType) => {
+    setMarkRow({ ...sub, examType })
+    setMarkScore(sub.score != null ? String(sub.score) : '')
+    setMarkFeedback(sub.feedback_text || '')
+  }
+
+  const saveMark = async () => {
+    if (!markRow) return
+    const numeric = Number(markScore)
+    if (markScore === '' || Number.isNaN(numeric) || numeric < 0 || numeric > 100) {
+      notify('Enter a score between 0 and 100')
+      return
+    }
+    setMarkSaving(true)
+    try {
+      const res = await apiClient.patch(`/exams/${markingDetail.id}/submissions/${markRow.id}/mark`, {
+        score: numeric,
+        feedback: markFeedback.trim() || null,
+      })
+      setMarkingSubmissions((prev) => prev.map((s) => (s.id === markRow.id ? { ...s, ...res.data } : s)))
+      setMarkRow(null)
+      notify('Marked — result published to the student')
+      setMarkingExams((prev) => prev.map((e) => (e.id === markingDetail.id
+        ? {
+            ...e,
+            marked_count: e.marked_count + 1,
+            pending_marking_count: Math.max(0, e.pending_marking_count - 1),
+          }
+        : e)))
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to save mark')
+    } finally {
+      setMarkSaving(false)
+    }
+  }
+
+  const saveReleaseDate = async (exam) => {
+    const value = releaseEdits[exam.id]
+    try {
+      const res = await apiClient.patch(`/exams/${exam.id}/results-release`, {
+        releaseAt: value ? new Date(value).toISOString() : null,
+      })
+      setMarkingExams((prev) => prev.map((e) => (e.id === exam.id ? { ...e, results_release_at: res.data.results_release_at } : e)))
+      notify(value ? 'Results release date saved' : 'Release date cleared — results are visible immediately')
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to save release date')
+    }
+  }
+
+  const saveEnrollmentNote = async (enrollmentId) => {
+    await apiClient.patch(`/enrollments/${enrollmentId}/notes`, {
+      notes: enrollmentNotesEdits[enrollmentId] || '',
+    })
+
+    if (selectedStudent) {
+      const response = await apiClient.get(`/enrollments/student/${selectedStudent.id}/history`)
+      setStudentHistory(response.data)
+    }
+    notify('Enrollment note updated')
+  }
+
+  const updateStudentLifecycle = async (student, status) => {
+    await apiClient.put(`/students/${student.id}`, { status })
+    await Promise.all([loadAllStudents(), loadGraduationMatrix(), loadGraduationSets()])
+    notify(`Student moved to ${status}`)
+  }
+
+  const openGradVetting = (student, targetStatus) => {
+    const confirmations = {}
+    for (const course of graduationMatrix.courses) {
+      const info = student.courses?.[course.id]
+      confirmations[course.id] = Boolean(info && info.result_status === 'Pass')
+    }
+    setGradVetting({ student, targetStatus })
+    setGradVettingConfirm(confirmations)
+    setGradVettingReason('')
+    setGradVettingSaving(false)
+    setOpenGraduationActionFor(null)
+  }
+
+  const vettingAllConfirmed = useMemo(() => {
+    if (!gradVetting) return false
+    return graduationMatrix.courses.every((course) => gradVettingConfirm[course.id])
+  }, [gradVetting, gradVettingConfirm, graduationMatrix.courses])
+
+  const confirmGradVetting = async () => {
+    if (!gradVetting || !vettingAllConfirmed) return
+    setGradVettingSaving(true)
+    try {
+      await apiClient.patch(`/students/${gradVetting.student.id}/lifecycle-status`, {
+        status: gradVetting.targetStatus,
+        reason: gradVettingReason || null,
+        courseIds: graduationMatrix.courses.map((course) => course.id),
+      })
+      await Promise.all([loadAllStudents(), loadGraduationMatrix(), loadGraduationSets()])
+      setGradVetting(null)
+      notify(`Student moved to ${gradVetting.targetStatus}`)
+    } catch (err) {
+      notify(err?.response?.data?.message || 'Failed to update status')
+    } finally {
+      setGradVettingSaving(false)
+    }
+  }
+
+  const sectionTitle = {
+    courses: 'Courses',
+    students: 'Students',
+    batches: 'Batches',
+    attendance: 'Attendance',
+    results: 'Results',
+    graduation: 'Graduation',
+    assignments: 'Exams',
+    marking: 'Marking',
+    lecturers: 'Lecturers',
+    'email-process': 'Email Process',
+    'email-formats': 'Email Formats',
+    forms: 'Forms',
+    reports: 'Reports',
+    'book-ministry': 'Book Ministry',
+    settings: 'Settings',
+  }[section] || 'Lecturer Dashboard'
+
+  return (
+    <AppShell title={sectionTitle} groups={lecturerNavGroups}>
+      <div className="h-full flex flex-col gap-4 overflow-hidden">
+      {notice ? (
+        <div className="fixed top-4 right-4 z-[60] max-w-sm bg-slate-900 text-white rounded-xl px-4 py-3 shadow-xl text-sm border border-white/10 flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+          <span className="flex-1">{notice}</span>
+        </div>
+      ) : null}
+
+      {section === 'marking' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          {!markingDetail ? (
+            <div className="flex flex-col gap-4 min-h-0">
+              <div className="card rounded-[24px] px-5 py-4">
+                <h3 className="font-semibold text-slate-900 text-base">Exams awaiting marking</h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {user?.role === 'lecturer'
+                    ? 'Only exams in your assigned courses are shown here.'
+                    : 'All exams — essay and paper submissions need a score and feedback.'}
+                </p>
+              </div>
+              {markingLoading ? (
+                <div className="flex-1 flex items-center justify-center"><Spinner className="h-8 w-8 text-indigo-600" /></div>
+              ) : markingExams.length === 0 ? (
+                <div className="card rounded-[24px] flex-1 flex items-center justify-center">
+                  <p className="text-sm text-slate-400">No exams yet. Create one in the Exams tab.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 overflow-y-auto pb-2 min-h-0">
+                  {markingExams.map((exam) => {
+                    const isMcq = exam.exam_type === 'mcq'
+                    const isPaper = exam.exam_type === 'paper'
+                    return (
+                      <div key={exam.id} className="card card-hover rounded-[24px] p-4 flex flex-col gap-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-slate-900 truncate">{exam.title}</p>
+                            <p className="text-xs text-slate-500 mt-0.5">{exam.course_title}</p>
+                          </div>
+                          <span className={`shrink-0 text-[10px] font-semibold uppercase tracking-wide rounded-full px-2 py-0.5 ${
+                            isMcq ? 'bg-sky-100 text-sky-700' : isPaper ? 'bg-amber-100 text-amber-700' : 'bg-indigo-50 text-indigo-600'
+                          }`}>
+                            {isMcq ? 'MCQ' : isPaper ? 'Paper' : 'Essay'}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="rounded-full bg-slate-100 text-slate-600 px-2 py-0.5">{exam.submitted_count} submitted</span>
+                          {isMcq ? (
+                            <span className={`rounded-full px-2 py-0.5 ${exam.results_pending_release > 0 ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                              {exam.results_pending_release > 0 ? `${exam.results_pending_release} results pending release` : 'results released'}
+                            </span>
+                          ) : (
+                            <span className={`rounded-full px-2 py-0.5 ${exam.pending_marking_count > 0 ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                              {exam.pending_marking_count > 0 ? `${exam.pending_marking_count} to mark` : 'all marked'}
+                            </span>
+                          )}
+                          {exam.marked_count > 0 && (
+                            <span className="rounded-full bg-slate-50 text-slate-500 px-2 py-0.5">{exam.marked_count} marked</span>
+                          )}
+                        </div>
+                        {isMcq && (
+                          <div className="flex items-end gap-2 border-t border-slate-100 pt-3">
+                            <label className="flex-1 text-xs text-slate-500">
+                              Results release date (optional)
+                              <input
+                                type="datetime-local"
+                                className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                value={
+                                  releaseEdits[exam.id] !== undefined
+                                    ? releaseEdits[exam.id]
+                                    : exam.results_release_at
+                                      ? new Date(new Date(exam.results_release_at).getTime() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+                                      : ''
+                                }
+                                onChange={(e) => setReleaseEdits((prev) => ({ ...prev, [exam.id]: e.target.value }))}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => saveReleaseDate(exam)}
+                              className="rounded-lg bg-slate-900 text-white px-3 py-2 text-xs font-medium hover:bg-slate-700"
+                            >
+                              Save
+                            </button>
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => openMarkingExam(exam)}
+                          className="self-start rounded-xl bg-indigo-600 text-white px-4 py-2 text-sm font-medium hover:bg-indigo-700"
+                        >
+                          {isMcq ? 'View submissions' : 'Mark submissions'}
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          ) : markingDetailLoading ? (
+            <div className="flex-1 flex items-center justify-center"><Spinner className="h-8 w-8 text-indigo-600" /></div>
+          ) : (
+            <div className="flex-1 min-h-0 flex flex-col gap-4">
+              <div className="card rounded-[24px] px-5 py-4 flex items-center justify-between gap-3 shrink-0">
+                <div className="min-w-0">
+                  <h3 className="font-semibold text-slate-900 text-base truncate">{markingDetail.title}</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">{markingDetail.course_title} · {markingSubmissions.length} submission(s)</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMarkingDetail(null)}
+                  className="rounded-lg bg-slate-100 text-slate-700 px-3 py-1.5 text-sm font-medium hover:bg-slate-200 shrink-0"
+                >
+                  ← Back
+                </button>
+              </div>
+              {markingSubmissions.length === 0 ? (
+                <div className="card rounded-[24px] flex-1 flex items-center justify-center">
+                  <p className="text-sm text-slate-400">No submissions yet.</p>
+                </div>
+              ) : (
+                <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pb-2">
+                  {markingSubmissions.map((sub) => {
+                    const isMcq = markingDetail.exam_type === 'mcq'
+                    const isPaper = markingDetail.exam_type === 'paper'
+                    const answers = sub.answers || {}
+                    const questionText = (id) => {
+                      const q = (markingQuestions || []).find((x) => String(x.id) === String(id))
+                      return q ? q.question_text : ''
+                    }
+                    return (
+                      <div key={sub.id} className="card rounded-[24px] p-4 space-y-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="font-semibold text-slate-900">{sub.student_name}</p>
+                            <p className="text-xs text-slate-400">{sub.student_email} · {sub.matric_number || 'No matric'} · {sub.submitted_at ? new Date(sub.submitted_at).toLocaleString() : '—'}</p>
+                          </div>
+                          {sub.status === 'marked' ? (
+                            <span className="rounded-full bg-emerald-50 text-emerald-700 px-2 py-0.5 text-xs font-medium">Marked · {sub.score}%</span>
+                          ) : (
+                            <span className="rounded-full bg-amber-50 text-amber-700 px-2 py-0.5 text-xs font-medium">To mark</span>
+                          )}
+                        </div>
+
+                        {isMcq ? (
+                          <p className="text-sm text-slate-600 border-t border-slate-100 pt-3">
+                            Auto-marked at submission — {sub.correct_count}/{sub.total_questions} correct ({sub.score}%).
+                            {sub.result_sent_at ? ' Result released.' : ' Result awaiting release.'}
+                          </p>
+                        ) : markingDetail.exam_type === 'essay' && (
+                          <div className="border-t border-slate-100 pt-3 space-y-2">
+                            {Object.keys(answers).length === 0 ? (
+                              <p className="text-sm text-slate-400">No answers recorded.</p>
+                            ) : Object.entries(answers).map(([questionId, text]) => (
+                              <div key={questionId} className="rounded-xl bg-slate-50 p-3">
+                                <p className="text-[11px] font-semibold text-slate-400 mb-1">{questionText(questionId) || `Question #${questionId}`}</p>
+                                <p className="text-sm text-slate-700 whitespace-pre-wrap">{String(text)}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {isPaper && (
+                          <div className="border-t border-slate-100 pt-3">
+                            <p className="text-[11px] font-semibold text-slate-400 mb-1">Submitted paper</p>
+                            <div
+                              className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700 max-w-none overflow-y-auto max-h-[360px]"
+                              dangerouslySetInnerHTML={{ __html: answers.paper || '<p class="text-slate-400">Empty submission.</p>' }}
+                            />
+                          </div>
+                        )}
+
+                        {!isMcq && (
+                          <div className="flex flex-col sm:flex-row items-end gap-2 border-t border-slate-100 pt-3">
+                            <label className="w-28 text-xs text-slate-500 shrink-0">
+                              Score (0–100)
+                              <input
+                                type="number" min="0" max="100"
+                                className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                value={markRow?.id === sub.id ? markScore : (sub.score != null ? String(sub.score) : '')}
+                                readOnly={markRow?.id !== sub.id}
+                                disabled={markRow?.id !== sub.id}
+                                onChange={(e) => setMarkScore(e.target.value)}
+                              />
+                            </label>
+                            <label className="flex-1 text-xs text-slate-500">
+                              Feedback (shown to the student)
+                              <textarea
+                                rows={2}
+                                className="mt-1 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                placeholder="Comments on the paper…"
+                                readOnly={markRow?.id !== sub.id}
+                                disabled={markRow?.id !== sub.id}
+                                value={markRow?.id === sub.id ? markFeedback : (sub.feedback_text || '')}
+                                onChange={(e) => setMarkFeedback(e.target.value)}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              disabled={markSaving}
+                              onClick={() => (markRow?.id === sub.id ? saveMark() : openMarkModal(sub, markingDetail.exam_type))}
+                              className="rounded-lg bg-indigo-600 text-white px-3 py-2 text-xs font-medium hover:bg-indigo-700 disabled:opacity-60 shrink-0"
+                            >
+                              {markRow?.id === sub.id ? (markSaving ? 'Saving…' : 'Save mark') : 'Mark'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {section === 'attendance' ? (
+        <div className="shrink-0 flex flex-col gap-4">
+          <div className="bento bento-4 gap-4">
+            <Card title="My Courses" value={courses.length} icon={<BookOpen size={20} />} accent="gold" className="stat-hover" />
+            <Card
+              title="Active Session"
+              value={attendanceStatus.activeSession ? (attendanceStatus.isLive ? 'LIVE' : 'Yes') : 'No'}
+              icon={<ClipboardCheck size={20} />}
+              accent="emerald"
+              className="stat-hover"
+            />
+            <Card title="LMS Present" value={Number(attendanceStatus.lmsPresent ?? attendanceStatus.live?.lms_present_count ?? 0)} icon={<Users size={20} />} accent="sky" className="stat-hover" />
+            <Card title="Current Course" value={selectedCourse ? selectedCourse.title : '—'} hint={selectedCourse?.class_day || ''} icon={<BookOpen size={20} />} accent="gold" className="stat-hover" />
+          </div>
+          <div className="shrink-0 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display font-bold tracking-tight text-slate-900 text-lg">Attendance</h2>
+              <p className="text-sm text-slate-500 mt-0.5">{selectedCourse ? selectedCourse.title : 'Select a course to view attendance — set one as current in Courses'}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => setShowLiveClassDrawer(true)} className="btn btn-primary btn-sm lift inline-flex items-center gap-1.5">
+                <Video size={14} /> Live Classes
+              </button>
+              <button type="button" onClick={() => setShowAddAttendance(true)} className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5">
+                <Plus size={14} /> Add New Attendance
+              </button>
+              <button type="button" onClick={() => setShowAttendanceHistory(true)} className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5">
+                <ClipboardCheck size={14} /> Attendance History
+              </button>
+            </div>
+          </div>
+        </div>
+
+      ) : null}
+
+      {section === 'courses' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          {/* Header: tabs — shrink-0, gap-4 consistent */}
+          <div className="flex items-center justify-between gap-4 shrink-0">
+            <div className="flex gap-1 bg-slate-100 rounded-xl p-1 w-fit">
+              {['courses', 'plans', 'timeline'].map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setCoursesTab(tab)}
+                  className={`rounded-lg px-5 py-1.5 text-sm font-medium capitalize transition-colors ${coursesTab === tab ? 'bg-white text-indigo-700 shadow-sm border border-indigo-100' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  {tab === 'courses' ? 'Courses' : tab === 'plans' ? 'Plans' : 'Timeline'}
+                </button>
+              ))}
+            </div>
+            {coursesTab === 'courses' ? (
+              <div className="shrink-0 flex gap-2">
+                <button type="button" onClick={() => setShowCreateCourseModal(true)} className="btn btn-primary btn-sm lift inline-flex items-center gap-1.5">
+                  <Plus size={14} /> Create Course
+                </button>
+                <button type="button" onClick={() => setShowCourseBulkModal(true)} className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5">
+                  <Upload size={14} /> Bulk Upload
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          {/* ── COURSES TAB ── */}
+          {coursesTab === 'courses' ? (
+          <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden isolate rounded-[24px]">
+            <div className="shrink-0 flex items-center gap-3 px-5 py-4 border-b border-slate-100 bg-white rounded-t-[24px]">
+              <h3 className="font-semibold text-slate-900 text-base">Course List</h3>
+              <span className="text-xs text-slate-400 bg-slate-100 rounded-full px-2.5 py-0.5 font-medium">{courses.length} courses</span>
+            </div>
+            <div className="flex-1 min-h-0 overflow-auto">
+            <DataTable
+              data={courses}
+              loading={coursesLoading}
+              rowKey="id"
+              initialPageSize={25}
+              emptyMessage="No courses yet. Create one using the form."
+              emptyIcon={<BookOpen size={32} />}
+              rowClassName={(course) => (course.is_current ? '!bg-amber-50/50' : '')}
+              globalSearchPlaceholder="Search code, title, lecturer…"
+              defaultSort={{ id: 'title', dir: 'asc' }}
+              columns={[
+                {
+                  id: 'course_code',
+                  header: 'Code',
+                  accessor: 'course_code',
+                  width: '110px',
+                  cell: (course) => (
+                    <span className="font-mono text-xs font-medium text-slate-600 bg-slate-100 rounded-md px-2 py-0.5">
+                      {course.course_code || '—'}
+                    </span>
+                  ),
+                },
+                {
+                  id: 'title',
+                  header: 'Course Title',
+                  accessor: 'title',
+                  cell: (course) => (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Link to={`/lecturer/courses/${course.id}`} className="font-medium text-slate-900 hover:text-indigo-600 transition-colors truncate">
+                        {course.title}
+                      </Link>
+                      {course.is_current ? (
+                        <span className="shrink-0 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                          Current
+                        </span>
+                      ) : null}
+                    </div>
+                  ),
+                },
+                {
+                  id: 'lecturer',
+                  header: 'Lecturer',
+                  accessor: (c) => c.lecturer_name || c.assigned_lecturer || '',
+                  cell: (c) => c.lecturer_name || c.assigned_lecturer || null,
+                },
+                {
+                  id: 'schedule',
+                  header: 'Schedule',
+                  accessor: (c) => [c.class_day, c.class_time].filter(Boolean).join(' '),
+                  cell: (course) => (
+                    course.class_day || course.class_time ? (
+                      <div className="flex flex-col">
+                        {course.class_day ? <span className="text-slate-700 font-medium">{course.class_day}</span> : null}
+                        {course.class_time ? <span className="text-xs text-slate-400">{course.class_time}</span> : null}
+                      </div>
+                    ) : null
+                  ),
+                },
+                {
+                  id: 'duration',
+                  header: 'Duration',
+                  accessor: 'duration_weeks',
+                  sortType: 'number',
+                  cell: (course) => (
+                    <div className="flex flex-col">
+                      <span className="text-slate-700 text-xs">{fmtDateRange(course.start_date, course.end_date)}</span>
+                      <span className="text-[11px] text-slate-400">{course.duration_weeks} week{course.duration_weeks !== 1 ? 's' : ''}</span>
+                    </div>
+                  ),
+                },
+                {
+                  id: 'attendance',
+                  header: 'Attendance',
+                  accessor: 'min_attendance_required',
+                  sortType: 'number',
+                  width: '110px',
+                  cell: (c) => (c.min_attendance_required != null ? `${c.min_attendance_required}%` : null),
+                },
+                {
+                  id: 'status',
+                  header: 'Status',
+                  accessor: (c) => (c.is_current ? 'Active' : 'Inactive'),
+                  filterType: 'select',
+                  filterOptions: ['Active', 'Inactive'],
+                  align: 'center',
+                  width: '120px',
+                  cell: (course) => (
+                    course.is_current ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-700 text-[11px] font-semibold px-2.5 py-0.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                        Active
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setCourseAsCurrent(course.id)}
+                        className="rounded-lg px-2.5 py-1 text-[11px] font-medium bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-700 transition-colors cursor-pointer"
+                      >
+                        Set active
+                      </button>
+                    )
+                  ),
+                },
+                {
+                  id: 'actions',
+                  header: '',
+                  filterable: false,
+                  sortable: false,
+                  align: 'right',
+                  width: '90px',
+                  cell: (course) => (
+                    <div className="flex items-center justify-end gap-1 opacity-70 group-hover:opacity-100 transition-opacity">
+                      <Link
+                        to={`/lecturer/courses/${course.id}`}
+                        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors"
+                        title="View course"
+                      >
+                        <BookOpen size={15} />
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => deleteCourse(course.id, course.title)}
+                        className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors cursor-pointer"
+                        title="Delete course"
+                      >
+                        <X size={15} />
+                      </button>
+                    </div>
+                  ),
+                },
+              ]}
+              fillHeight
+            />
+            </div>
+          </div>
+      ) : null}
+
+      {/* ── PLANS TAB ── */}
+      {coursesTab === 'plans' ? (() => {
+        const loadPlans = async () => {
+          const res = await apiClient.get('/course-plans')
+          setPlans(res.data)
+        }
+        const openPlan = async (plan) => {
+          setPlanLoading(true)
+          const [planRes, eligRes] = await Promise.all([
+            apiClient.get(`/course-plans/${plan.id}`),
+            apiClient.get(`/course-plans/${plan.id}/eligible-students`),
+          ])
+          setSelectedPlan(planRes.data)
+          setEligibleStudents(eligRes.data.students || [])
+          setPlanItemForm({ courseId: '', startDate: '', endDate: '' })
+          setPlanLoading(false)
+        }
+        const createPlan = async (ev) => {
+          ev.preventDefault()
+          if (!planForm.name || !planForm.year) return
+          const res = await apiClient.post('/course-plans', { name: planForm.name, year: Number(planForm.year) })
+          setPlanForm({ name: '', year: new Date().getFullYear() })
+          const updated = await apiClient.get('/course-plans')
+          setPlans(updated.data)
+          openPlan(res.data)
+        }
+        const savePlanEdit = async (ev) => {
+          ev.preventDefault()
+          await apiClient.put(`/course-plans/${editingPlan.id}`, { name: editingPlan.name, year: Number(editingPlan.year) })
+          setEditingPlan(null)
+          const updated = await apiClient.get('/course-plans')
+          setPlans(updated.data)
+          if (selectedPlan?.id === editingPlan.id) {
+            const res = await apiClient.get(`/course-plans/${editingPlan.id}`)
+            setSelectedPlan(res.data)
+          }
+        }
+        const setActive = async (planId) => {
+          await apiClient.patch(`/course-plans/${planId}/set-active`)
+          const updated = await apiClient.get('/course-plans')
+          setPlans(updated.data)
+          if (selectedPlan?.id === planId) {
+            setSelectedPlan((p) => p ? { ...p, is_active: true } : p)
+          }
+          notify('Active plan updated')
+        }
+        const deletePlan = async (planId) => {
+          if (!(await dialogConfirm('Planned courses in this plan will be detached from the plan (not deleted).', { title: 'Delete this plan?', confirmLabel: 'Delete' }))) return
+          await apiClient.delete(`/course-plans/${planId}`)
+          if (selectedPlan?.id === planId) { setSelectedPlan(null); setEligibleStudents([]) }
+          const updated = await apiClient.get('/course-plans')
+          setPlans(updated.data)
+        }
+        const addItem = async (ev) => {
+          ev.preventDefault()
+          if (!selectedPlan || !planItemForm.courseId) return
+          await apiClient.post(`/course-plans/${selectedPlan.id}/items`, {
+            courseId: Number(planItemForm.courseId),
+            startDate: planItemForm.startDate || null,
+            endDate: planItemForm.endDate || null,
+          })
+          setPlanItemForm({ courseId: '', startDate: '', endDate: '' })
+          const res = await apiClient.get(`/course-plans/${selectedPlan.id}`)
+          setSelectedPlan(res.data)
+        }
+        const removeItem = async (itemId) => {
+          await apiClient.delete(`/course-plans/${selectedPlan.id}/items/${itemId}`)
+          const res = await apiClient.get(`/course-plans/${selectedPlan.id}`)
+          setSelectedPlan(res.data)
+        }
+        // Load plans on first render of this tab (only once)
+        if (plans.length === 0 && !planLoading) {
+          setPlanLoading(true)
+          apiClient.get('/course-plans').then((r) => { setPlans(r.data); setPlanLoading(false) })
+        }
+        return (
+           <div className="flex-1 min-h-0 overflow-auto">
+           <div className="grid lg:grid-cols-[320px_1fr] gap-4">
+             {/* Left: create + list */}
+             <div className="space-y-4">
+                {/* Create plan form — single-viewport inline */}
+                <form onSubmit={createPlan} className="card card-hover flex flex-col overflow-hidden md:max-h-[60vh]">
+                  <div className="shrink-0 px-5 py-4 border-b border-slate-100 bg-white">
+                    <h3 className="font-semibold text-slate-900">New Plan</h3>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                    <input
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                      placeholder="Plan name (e.g. 2026 Academic Year)"
+                      value={planForm.name}
+                      onChange={(e) => setPlanForm((p) => ({ ...p, name: e.target.value }))}
+                      required
+                    />
+                    <input
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                      type="number"
+                      placeholder="Year"
+                      value={planForm.year}
+                      onChange={(e) => setPlanForm((p) => ({ ...p, year: e.target.value }))}
+                      required
+                    />
+                  </div>
+                  <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+                    <button className="w-full btn btn-primary py-2 text-sm">Create Plan</button>
+                  </div>
+               </form>
+
+              {/* Plan list */}
+              <div className="card card-pad card-hover space-y-2">
+                <h3 className="font-semibold text-slate-900 mb-3">All Plans</h3>
+                {plans.length === 0 && !planLoading ? (
+                  <p className="text-sm text-slate-400">No plans yet. Create one above.</p>
+                ) : null}
+                {plans.map((plan) => (
+                  <div key={plan.id}>
+                    {editingPlan?.id === plan.id ? (
+                      <form onSubmit={savePlanEdit} className="border border-slate-300 rounded-xl p-3 space-y-2 bg-slate-50">
+                        <input
+                          className="w-full border rounded-lg px-3 py-1.5 text-sm"
+                          value={editingPlan.name}
+                          onChange={(e) => setEditingPlan((p) => ({ ...p, name: e.target.value }))}
+                          required
+                        />
+                        <input
+                          type="number"
+                          className="w-full border rounded-lg px-3 py-1.5 text-sm"
+                          value={editingPlan.year}
+                          onChange={(e) => setEditingPlan((p) => ({ ...p, year: e.target.value }))}
+                          required
+                        />
+                        <div className="flex gap-2">
+                          <button type="submit" className="flex-1 btn btn-primary py-1.5 text-xs">Save</button>
+                          <button type="button" onClick={() => setEditingPlan(null)} className="flex-1 bg-slate-100 text-slate-700 rounded-lg py-1.5 text-xs">Cancel</button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div
+                        className={`flex items-start justify-between rounded-xl px-3 py-3 cursor-pointer border transition-colors ${selectedPlan?.id === plan.id ? 'border-slate-900 bg-slate-50' : 'border-slate-200 hover:bg-slate-50'}`}
+                        onClick={() => openPlan(plan)}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium text-slate-900 truncate">{plan.name}</p>
+                            {plan.is_active ? (
+                              <span className="shrink-0 rounded-full bg-emerald-100 text-emerald-700 text-xs px-2 py-0.5 font-medium">Active</span>
+                            ) : null}
+                          </div>
+                          <p className="text-xs text-slate-500">{plan.year} · {plan.item_count} course{plan.item_count !== 1 ? 's' : ''}</p>
+                        </div>
+                        <div className="flex items-center gap-1 ml-2 shrink-0">
+                          {!plan.is_active ? (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setActive(plan.id) }}
+                              className="text-emerald-600 hover:text-emerald-800 text-xs px-2 py-1 rounded-lg hover:bg-emerald-50"
+                            >
+                              Set Active
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setEditingPlan({ id: plan.id, name: plan.name, year: plan.year }) }}
+                            className="text-slate-500 hover:text-slate-800 text-xs px-2 py-1 rounded-lg hover:bg-slate-100"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); deletePlan(plan.id) }}
+                            className="text-red-400 hover:text-red-600 text-xs px-2 py-1 rounded-lg hover:bg-red-50"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Right: plan detail */}
+            <div className="card card-pad card-hover">
+              {!selectedPlan ? (
+                <div className="flex items-center justify-center h-48 text-slate-400 text-sm">
+                  Select or create a plan to view its courses
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-semibold text-slate-900 text-lg">{selectedPlan.name}</h3>
+                        {selectedPlan.is_active ? (
+                          <span className="rounded-full bg-emerald-100 text-emerald-700 text-xs px-2 py-0.5 font-medium">Active Plan</span>
+                        ) : null}
+                      </div>
+                      <p className="text-sm text-slate-500">{selectedPlan.year} · {selectedPlan.items?.length || 0} courses planned</p>
+                    </div>
+                  </div>
+
+                  {/* Eligible students summary */}
+                  {eligibleStudents.length > 0 ? (
+                    <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+                      <p className="text-sm font-medium text-indigo-800 mb-1">
+                        {eligibleStudents.length} Eligible Student{eligibleStudents.length !== 1 ? 's' : ''} for {selectedPlan.year}
+                      </p>
+                      <p className="text-xs text-indigo-600">
+                        Includes cohorts {selectedPlan.year - 1}–{selectedPlan.year} plus any student with a prior failed result.
+                      </p>
+                      <details className="mt-2">
+                        <summary className="text-xs text-indigo-700 cursor-pointer select-none">View list</summary>
+                        <div className="mt-2 max-h-40 overflow-y-auto space-y-1">
+                          {eligibleStudents.map((s) => (
+                            <div key={s.id} className="flex items-center justify-between text-xs">
+                              <span className="text-slate-800">{s.full_name} {s.matric_no ? `(${s.matric_no})` : ''}</span>
+                              <span className={`rounded-full px-2 py-0.5 ${s.reason === 'failed_reenroll' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
+                                {s.reason === 'failed_reenroll' ? 'Re-enroll' : s.cohort_name}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-400">No eligible students found for cohort years {selectedPlan.year - 1}–{selectedPlan.year}.</p>
+                  )}
+
+                  {/* Add course to plan — scrollable inline */}
+                  <form onSubmit={addItem} className="border border-slate-200 rounded-xl flex flex-col overflow-hidden md:max-h-[50vh]">
+                    <div className="shrink-0 px-4 py-3 border-b border-slate-100 bg-white">
+                      <p className="text-sm font-medium text-slate-700">Add Course to Plan</p>
+                    </div>
+                    <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+                    <select
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                      value={planItemForm.courseId}
+                      onChange={(e) => setPlanItemForm((p) => ({ ...p, courseId: e.target.value }))}
+                      required
+                    >
+                      <option value="">Select a course</option>
+                      {courses.map((c) => (
+                        <option key={c.id} value={c.id}>{c.course_code ? `${c.course_code} — ` : ''}{c.title}</option>
+                      ))}
+                    </select>
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="text-xs text-slate-500 block">
+                        Start Date
+                        <input type="date" className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" value={planItemForm.startDate} onChange={(e) => setPlanItemForm((p) => ({ ...p, startDate: e.target.value }))} />
+                      </label>
+                      <label className="text-xs text-slate-500 block">
+                        End Date
+                        <input type="date" className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" value={planItemForm.endDate} onChange={(e) => setPlanItemForm((p) => ({ ...p, endDate: e.target.value }))} />
+                      </label>
+                    </div>
+                    </div>
+                    <div className="shrink-0 px-4 py-3 border-t border-slate-100 bg-white">
+                      <button className="btn btn-primary px-4 py-2 text-sm">Add to Plan</button>
+                    </div>
+                  </form>
+
+                  {/* Plan items table */}
+                  {selectedPlan.items?.length === 0 ? (
+                    <p className="text-sm text-slate-400">No courses in this plan yet.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium text-slate-700">Planned Courses</p>
+                      <table className="data-table w-full text-sm">
+                        <thead className="text-left text-slate-500 border-b border-slate-200 bg-[#F8FAFC] sticky top-0">
+                          <tr>
+                            <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Code</th>
+                            <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Course</th>
+                            <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Lecturer</th>
+                            <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Start</th>
+                            <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">End</th>
+                            <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Weeks</th>
+                            <th className="px-4 py-3" />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedPlan.items.map((item) => (
+                            <tr key={item.id} className="border-t border-slate-100 hover:bg-[#EEF2FF] [&>td]:hover:bg-transparent hover:shadow-[inset_3px_0_0_#6366f1]">
+                              <td className="px-4 py-3 text-slate-500">{item.course_code || '-'}</td>
+                              <td className="px-4 py-3 font-medium text-slate-900">{item.course_title}</td>
+                              <td className="px-4 py-3 text-slate-600">{item.lecturer_name || '-'}</td>
+                              <td className="px-4 py-3 text-slate-600">{item.start_date ? new Date(item.start_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
+                              <td className="px-4 py-3 text-slate-600">{item.end_date ? new Date(item.end_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</td>
+                              <td className="px-4 py-3 text-slate-600">{item.duration_weeks}w</td>
+                              <td className="px-4 py-3">
+                                <button type="button" onClick={() => removeItem(item.id)} className="text-red-400 hover:text-red-600 text-xs">Remove</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+          </div>
+        )
+      })() : null}
+
+      {/* ── TIMELINE TAB ── */}
+      {coursesTab === 'timeline' ? (() => {
+        const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+        const COURSE_COLORS = [
+          'bg-indigo-500', 'bg-violet-500', 'bg-indigo-500', 'bg-indigo-600',
+          'bg-violet-600', 'bg-indigo-400', 'bg-fuchsia-500', 'bg-indigo-600',
+        ]
+
+        const yearStart = new Date(calendarYear, 0, 1)
+        const yearEnd = new Date(calendarYear, 11, 31)
+        const yearMs = yearEnd - yearStart + 86400000
+
+        // Build a lookup: course_id → plan dates for this year's plan
+        const planDateByCourse = {}
+        for (const item of timelinePlanItems) {
+          planDateByCourse[item.course_id] = { start_date: item.start_date, end_date: item.end_date }
+        }
+
+        const hasPlan = timelinePlanItems.length > 0 || plans.some((p) => Number(p.year) === calendarYear)
+        const matchedPlan = plans.find((p) => Number(p.year) === calendarYear)
+
+        const bars = courses
+          .map((c) => ({
+            ...c,
+            start_date: planDateByCourse[c.id]?.start_date ?? c.start_date,
+            end_date: planDateByCourse[c.id]?.end_date ?? c.end_date,
+            fromPlan: !!planDateByCourse[c.id],
+          }))
+          .filter((c) => {
+            if (!c.start_date && !c.end_date) return false // hide completely undated in plan view
+            const s = c.start_date ? new Date(c.start_date) : null
+            const e = c.end_date ? new Date(c.end_date) : null
+            return (!e || e >= yearStart) && (!s || s <= yearEnd)
+          })
+          .map((c, idx) => {
+            const s = c.start_date ? new Date(c.start_date) : null
+            const e = c.end_date ? new Date(c.end_date) : null
+            const clampedStart = s ? Math.max(s - yearStart, 0) : 0
+            const clampedEnd = e ? Math.min(e - yearStart + 86400000, yearMs) : yearMs
+            const left = Math.round((clampedStart / yearMs) * 100)
+            const width = Math.max(Math.round(((clampedEnd - clampedStart) / yearMs) * 100), 3)
+            return { ...c, left, width, color: COURSE_COLORS[idx % COURSE_COLORS.length] }
+          })
+
+        return (
+          <div className="flex-1 min-h-0 overflow-auto">
+          <div className="card card-pad card-hover">
+            {/* Header row: year nav + plan badge */}
+            <div className="flex items-center gap-3 mb-5 flex-wrap">
+              <button type="button" onClick={() => setCalendarYear((y) => y - 1)} className="rounded-lg px-2 py-1 text-sm bg-slate-100 hover:bg-slate-200">◀</button>
+              <span className="font-semibold text-slate-900">{calendarYear} Timeline</span>
+              <button type="button" onClick={() => setCalendarYear((y) => y + 1)} className="rounded-lg px-2 py-1 text-sm bg-slate-100 hover:bg-slate-200">▶</button>
+              {timelinePlanLoading ? (
+                <span className="text-xs text-slate-400 animate-pulse">Loading plan…</span>
+              ) : matchedPlan ? (
+                <span className="text-xs rounded-full bg-sky-100 text-indigo-700 px-3 py-0.5 font-medium">
+                  {matchedPlan.name}{matchedPlan.is_active ? ' · Active' : ''}
+                </span>
+              ) : (
+                <span className="text-xs text-slate-400">No plan for {calendarYear}</span>
+              )}
+            </div>
+
+            {/* Month header */}
+            <div className="grid grid-cols-12 mb-1">
+              {MONTHS.map((m) => (
+                <div key={m} className="text-center text-xs text-slate-400 py-1">{m}</div>
+              ))}
+            </div>
+
+            {/* Timeline bar chart */}
+            <div className="relative border border-slate-200 rounded-xl overflow-hidden" style={{ minHeight: Math.max(bars.length * 44 + 16, 80) }}>
+              {/* vertical month dividers */}
+              <div className="absolute inset-0 grid grid-cols-12 pointer-events-none">
+                {MONTHS.map((m) => (
+                  <div key={m} className="border-r border-slate-100 last:border-0" />
+                ))}
+              </div>
+
+              {/* Today marker */}
+              {(() => {
+                const today = new Date()
+                if (today.getFullYear() === calendarYear) {
+                  const pct = ((today - yearStart) / yearMs) * 100
+                  return (
+                    <div
+                      className="absolute top-0 bottom-0 w-px bg-red-400 opacity-60 pointer-events-none"
+                      style={{ left: `${pct}%` }}
+                    />
+                  )
+                }
+                return null
+              })()}
+
+              {bars.length === 0 ? (
+                <p className="text-sm text-slate-400 text-center py-10">
+                  {matchedPlan
+                    ? `${matchedPlan.name} has no course items yet. Add courses in the Plans tab.`
+                    : `No plan found for ${calendarYear}. Create one in the Plans tab.`}
+                </p>
+              ) : null}
+
+              {bars.map((c, idx) => (
+                <div
+                  key={c.id}
+                  className="absolute flex items-center"
+                  style={{ top: idx * 44 + 8, left: `${c.left}%`, width: `${c.width}%`, height: 36 }}
+                >
+                  <Link
+                    to={`/lecturer/courses/${c.id}`}
+                    title={`${c.title}${c.start_date ? ` · ${fmtDateRange(c.start_date, c.end_date)}` : ''}`}
+                    className={`w-full h-full rounded-lg flex items-center px-2 gap-2 text-white text-xs font-medium truncate shadow-sm hover:opacity-90 transition-opacity ${c.color} ${c.is_current ? 'ring-2 ring-amber-400 ring-offset-1' : ''}`}
+                  >
+                    {c.is_current ? <span className="shrink-0 text-amber-200">●</span> : null}
+                    <span className="truncate">{c.course_code ? `${c.course_code} · ` : ''}{c.title}</span>
+                    <button
+                      type="button"
+                      className="ml-auto shrink-0 opacity-70 hover:opacity-100"
+                      title="Set as active course"
+                      onClick={(ev) => {
+                        ev.preventDefault()
+                        ev.stopPropagation()
+                        setCourseAsCurrent(c.id)
+                      }}
+                    >
+                      {c.is_current ? '★' : '☆'}
+                    </button>
+                  </Link>
+                </div>
+              ))}
+            </div>
+
+            {/* Legend */}
+            {bars.length > 0 ? (
+              <div className="mt-3 flex flex-wrap gap-3">
+                {bars.map((c) => (
+                  <div key={c.id} className="flex items-center gap-1.5 text-xs text-slate-600">
+                    <span className={`inline-block w-2.5 h-2.5 rounded-sm ${c.color}`} />
+                    {c.title}
+                    {c.fromPlan ? <span className="text-sky-500 ml-0.5" title="Dates from plan">●</span> : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          </div>
+        )
+      })() : null}
+        </div>
+      </div>
+) : null}
+
+      {section === 'students' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          <div className="flex gap-1 bg-slate-100 rounded-xl p-1 w-fit">
+            {[
+              { key: 'students', label: 'All Students' },
+              { key: 'prospective', label: 'Prospective' },
+            ].map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setStudentsTab(key)}
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                  studentsTab === key ? 'bg-white text-indigo-700 shadow-sm border border-indigo-100' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {studentsTab === 'prospective' ? (
+            <div className="space-y-4">
+              <div>
+                <h3 className="font-display text-xl font-semibold text-slate-900">Prospective Students</h3>
+                <p className="text-sm text-slate-500 mt-1">Students created from approved form submissions.</p>
+              </div>
+              {prospectiveStudentsLoading ? (
+                <p className="text-sm text-slate-400 animate-pulse">Loading prospective students…</p>
+              ) : (
+                <div>
+                    <DataTable
+                      data={prospectiveStudents}
+                      rowKey="student_id"
+                      initialPageSize={25}
+                      emptyMessage="No prospective students yet."
+                      emptyIcon={<UserPlus size={32} />}
+                      globalSearchPlaceholder="Search name, email, form…"
+                      defaultSort={{ id: 'submitted_at', dir: 'desc' }}
+                      columns={[
+                        { id: 'full_name', header: 'Name', accessor: 'full_name', cell: (s) => <span className="font-medium text-slate-900">{s.full_name}</span> },
+                        { id: 'email', header: 'Email', accessor: 'email' },
+                        { id: 'form_title', header: 'Form', accessor: 'form_title' },
+                        { id: 'cohort_name', header: 'Cohort', accessor: 'cohort_name' },
+                        {
+                          id: 'submitted_at',
+                          header: 'Submitted',
+                          accessor: 'submitted_at',
+                          sortType: 'date',
+                          cell: (s) => (s.submitted_at ? new Date(s.submitted_at).toLocaleDateString() : null),
+                        },
+                        {
+                          id: 'status',
+                          header: 'Status',
+                          accessor: 'status',
+                          filterType: 'select',
+                          filterOptions: ['Prospective'],
+                          cell: (s) => (
+                            <Badge tone="amber" dot>{s.status}</Badge>
+                          ),
+                        },
+                      ]}
+                    />
+                </div>
+              )}
+            </div>
+          ) : (
+          <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+            {/* Header: filters + actions — single-viewport yardstick header */}
+            <div className="shrink-0 flex flex-wrap items-center justify-between gap-3">
+              <h3 className="font-semibold text-slate-900">Student Directory</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  className="border rounded-lg px-3 py-2 text-sm bg-white"
+                  value={studentCohortFilter}
+                  onChange={(event) => setStudentCohortFilter(event.target.value)}
+                >
+                  <option value="">All Batches</option>
+                  {cohorts.map((cohort) => (
+                    <option key={cohort.id} value={String(cohort.id)}>
+                      {cohort.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="border rounded-lg px-3 py-2 text-sm bg-white"
+                  value={studentStatusFilter}
+                  onChange={(event) => setStudentStatusFilter(event.target.value)}
+                >
+                  <option value="current">Current students</option>
+                  <option value="all">All students</option>
+                  <option value="Active">Active</option>
+                  <option value="Prospective">Prospective</option>
+                  <option value="Graduating">Graduating</option>
+                  <option value="Graduated">Graduated</option>
+                  <option value="Alumni">Alumni</option>
+                </select>
+                <button type="button" onClick={exportStudentList} className="btn btn-ghost btn-sm lift">
+                  <Download size={14} /> Export
+                </button>
+                <button type="button" onClick={() => setShowBatchDrawer(true)} className="btn btn-ghost btn-sm lift">
+                  Manage Batches
+                </button>
+                <button type="button" onClick={() => setShowCreateStudentModal(true)} className="btn btn-primary btn-sm lift inline-flex items-center gap-1.5">
+                  <Plus size={14} /> Create Student
+                </button>
+                <button type="button" onClick={() => setShowCreateBatchModal(true)} className="btn btn-primary btn-sm lift inline-flex items-center gap-1.5">
+                  <Plus size={14} /> Create Batch
+                </button>
+                <button type="button" onClick={() => setShowStudentUploadModal(true)} className="btn btn-primary btn-sm lift inline-flex items-center gap-1.5">
+                  <Upload size={14} /> Upload Excel
+                </button>
+              </div>
+            </div>
+            <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden">
+              <div className="flex-1 min-h-0 overflow-auto">
+            <DataTable
+              data={filteredStudents}
+              loading={allStudentsLoading}
+              rowKey="id"
+              initialPageSize={25}
+              fillHeight
+              className="flex-1 min-h-0 border-0 shadow-none rounded-none"
+              emptyMessage="No students match these filters."
+              emptyIcon={<Users size={32} />}
+              globalSearchPlaceholder="Search name, email, matric, phone…"
+              defaultSort={{ id: 'full_name', dir: 'asc' }}
+              columns={[
+                {
+                  id: 'avatar',
+                  header: '',
+                  filterable: false,
+                  sortable: false,
+                  width: '52px',
+                  cell: (student) => (
+                    <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center overflow-hidden">
+                      {student.profile_image_url ? (
+                        <img src={student.profile_image_url} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <span className="text-xs font-bold text-slate-500">{(student.full_name || '?')[0].toUpperCase()}</span>
+                      )}
+                    </div>
+                  ),
+                },
+                {
+                  id: 'full_name',
+                  header: 'Name',
+                  accessor: 'full_name',
+                  cell: (student) => (
+                    <Link to={`/lecturer/students/${student.id}`} className="font-medium text-slate-900 hover:underline">
+                      {student.full_name}
+                    </Link>
+                  ),
+                },
+                {
+                  id: 'matric_no',
+                  header: 'Matric',
+                  accessor: 'matric_no',
+                  cell: (s) => s.matric_no || <span className="text-slate-400 text-xs italic">pending</span>,
+                },
+                { id: 'phone', header: 'Phone', accessor: 'phone' },
+                { id: 'email', header: 'Email', accessor: 'email' },
+                {
+                  id: 'status',
+                  header: 'Status',
+                  accessor: 'status',
+                  filterType: 'select',
+                  filterOptions: ['Active', 'Prospective', 'Graduating', 'Graduated', 'Alumni', 'On Hold', 'Suspended'],
+                  cell: (student) => {
+                    const toneMap = { Active: 'emerald', Prospective: 'amber', Graduating: 'gold', Graduated: 'sky', Alumni: 'slate', 'On Hold': 'amber', Suspended: 'rose', Applied: 'slate', 'Under Review': 'amber', Accepted: 'sky' }
+                    return (
+                    <button type="button" onClick={() => {
+                        setQuickStatusStudent(student)
+                        setQuickSelectedStatus(null)
+                        setQuickStatusReason('')
+                        apiClient.get(`/students/${student.id}/next-statuses`).then((r) => setQuickStatusOptions(r.data.nextStatuses || [])).catch(() => setQuickStatusOptions([]))
+                        setShowQuickStatus(true)
+                      }} className="hover:opacity-90 transition-opacity">
+                      <Badge tone={toneMap[student.status] || 'slate'} dot>{student.status}</Badge>
+                    </button>
+                  )},
+                },
+                {
+                  id: 'cohort_name',
+                  header: 'Batch',
+                  accessor: 'cohort_name',
+                  filterType: 'select',
+                  filterOptions: cohorts.map((c) => c.name).filter(Boolean),
+                },
+                {
+                  id: 'actions',
+                  header: 'Actions',
+                  filterable: false,
+                  sortable: false,
+                  align: 'right',
+                  cell: (student) => (
+                    <div className="flex items-center justify-end gap-2">
+                      <button type="button" onClick={() => openStudentPanel(student)} className="btn btn-ghost btn-sm lift">View</button>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm lift"
+                        onClick={async () => {
+                          if (!(await dialogConfirm(`${student.full_name}'s profile, results and attendance will be permanently removed.`, { title: `Delete ${student.full_name}?`, confirmLabel: 'Delete' }))) return
+                          try {
+                            await apiClient.delete(`/students/${student.id}`)
+                            setAllStudents((prev) => prev.filter((s) => s.id !== student.id))
+                          } catch (err) {
+                            alert(err?.response?.data?.message || 'Delete failed')
+                          }
+                        }}
+                      >Delete</button>
+                    </div>
+                  ),
+                },
+              ]}
+            />
+              </div>
+            </div>
+
+          {selectedStudent && studentEditForm ? (
+            <div className="fixed right-0 top-0 h-full w-96 max-w-full bg-white border-l border-slate-200 shadow-2xl z-50 flex flex-col overflow-hidden isolate">
+              <div className="shrink-0 bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between">
+                <h3 className="font-semibold text-slate-900">Student Profile</h3>
+                <button type="button" onClick={closeStudentPanel} className="rounded-lg p-1 hover:bg-slate-100">
+                  <X size={18} />
+                </button>
+              </div>
+
+              <form onSubmit={saveStudentEdit} className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-4">
+                {/* Profile Image */}
+                <div className="flex items-center gap-4 mb-4">
+                  <div
+                    className="w-24 h-24 rounded-full bg-slate-200 flex items-center justify-center overflow-hidden shrink-0 cursor-pointer hover:opacity-90 transition-opacity"
+                    onClick={() => studentEditForm.profile_image_url && setLightboxOpen(true)}
+                  >
+                    {studentEditForm.profile_image_url ? (
+                      <img src={studentEditForm.profile_image_url} alt={studentEditForm.full_name} className="w-full h-full object-cover" />
+                    ) : (
+                      <span className="text-3xl font-bold text-slate-500">{(studentEditForm.full_name || '?')[0].toUpperCase()}</span>
+                    )}
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-sm text-slate-600 block">
+                      Profile Image
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="mt-1 w-full text-sm"
+                        onChange={(e) => setProfileImageFile(e.target.files?.[0] || null)}
+                      />
+                    </label>
+                    {profileImageFile && (
+                      <button
+                        type="button"
+                        onClick={uploadProfileImage}
+                        disabled={profileImageUploading}
+                        className="mt-1 text-xs btn btn-primary px-3 py-1 disabled:opacity-50"
+                      >
+                        {profileImageUploading ? 'Uploading...' : 'Upload'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <input className="w-full border rounded-lg px-3 py-2" value={studentEditForm.full_name || ''} onChange={(event) => setStudentEditForm((prev) => ({ ...prev, full_name: event.target.value }))} required />
+                <input className="w-full border rounded-lg px-3 py-2" value={studentEditForm.email || ''} onChange={(event) => setStudentEditForm((prev) => ({ ...prev, email: event.target.value }))} required />
+                <input className="w-full border rounded-lg px-3 py-2" value={studentEditForm.phone || ''} onChange={(event) => setStudentEditForm((prev) => ({ ...prev, phone: event.target.value }))} required />
+                <input className="w-full border rounded-lg px-3 py-2" value={studentEditForm.matric_no || ''} onChange={(event) => setStudentEditForm((prev) => ({ ...prev, matric_no: event.target.value }))} />
+                <textarea className="w-full border rounded-lg px-3 py-2" placeholder="Comments" rows={3} value={studentEditForm.comments || ''} onChange={(event) => setStudentEditForm((prev) => ({ ...prev, comments: event.target.value }))} />
+
+                {/* Status Pipeline */}
+                <div>
+                  <p className="text-sm font-medium text-slate-700 mb-2">Student Status</p>
+                  <div className="relative mb-2">
+                    <button
+                      type="button"
+                      className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-medium cursor-pointer transition-all hover:ring-2 hover:ring-slate-300 ${
+                        STATUS_COLORS[studentEditForm.status] || 'bg-slate-100 text-slate-700'
+                      }`}
+                      onClick={() => setPanelStatusOpen((open) => !open)}
+                    >
+                      {studentEditForm.status} <span className="text-[10px] ml-0.5 opacity-50">▼</span>
+                    </button>
+                    <div className={`absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 min-w-[180px] transition-all py-1 max-h-64 overflow-y-auto ${
+                        panelStatusOpen ? 'opacity-100 visible' : 'opacity-0 invisible pointer-events-none'
+                      }`}>
+                      {ALL_STATUSES.map((s) => {
+                        const isCurrent = studentEditForm.status === s
+                        return (
+                          <button
+                            key={s}
+                            type="button"
+                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                              isCurrent
+                                ? 'bg-slate-100 text-slate-900 font-semibold'
+                                : 'text-slate-600 hover:bg-slate-50'
+                            }`}
+                            onClick={() => {
+                              if (!isCurrent) {
+                                setPanelStatusOpen(false)
+                                setPendingStatus(s)
+                                setStatusTransitionReason('')
+                                setStatusConfirmOpen(true)
+                              }
+                            }}
+                            disabled={isCurrent}
+                          >
+                            {isCurrent ? '✓ ' : ''}{s}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Status History inline */}
+                  {statusHistory.length > 0 && (
+                    <div className="mb-2">
+                      <p className="text-xs text-slate-500 mb-1">Status History</p>
+                      <div className="space-y-1 max-h-32 overflow-y-auto">
+                        {statusHistory.slice(0, 5).map((h) => (
+                          <div key={h.id} className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-2.5 py-1.5">
+                            <div>
+                              <span className="text-slate-500">{h.from_status}</span>
+                              <span className="mx-1 text-slate-300">→</span>
+                              <span className="font-medium text-slate-800">{h.to_status}</span>
+                              {h.reason && <span className="ml-1.5 text-slate-400 italic">({h.reason})</span>}
+                            </div>
+                            <span className="text-slate-400 shrink-0 ml-2">{new Date(h.changed_at).toLocaleDateString()}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <label className="text-sm text-slate-600 block">
+                  Batch
+                  <select
+                    className="mt-1 w-full border rounded-lg px-3 py-2"
+                    value={studentEditForm.cohort_id || ''}
+                    onChange={(event) => setStudentEditForm((prev) => ({ ...prev, cohort_id: event.target.value ? Number(event.target.value) : null }))}
+                  >
+                    <option value="">No batch</option>
+                    {cohorts.map((cohort) => (
+                      <option key={cohort.id} value={cohort.id}>
+                        {cohort.name} ({cohort.status})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div>
+                  <p className="text-sm font-medium text-slate-700 mb-2">Additional Statuses</p>
+                  <div className="space-y-2">
+                    {(studentEditForm.statuses || []).map((statusItem) => (
+                      <div key={statusItem.id} className="flex items-center justify-between bg-slate-100 rounded-lg px-3 py-2 text-sm">
+                        <span>{statusItem.statusName}</span>
+                        <button type="button" onClick={() => removeStudentStatus(statusItem.id)} className="text-red-600">Remove</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <input className="flex-1 border rounded-lg px-3 py-2" placeholder="Add status" value={newStatusInput} onChange={(event) => setNewStatusInput(event.target.value)} />
+                  <button type="button" onClick={addStudentStatus} className="btn btn-primary px-3 py-2">Add</button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-2">
+                  <button className="btn btn-primary py-2">Save</button>
+                  <button type="button" className="bg-slate-200 rounded-lg py-2" onClick={closeStudentPanel}>Cancel</button>
+                </div>
+
+              {/* Lightbox */}
+              {lightboxOpen && studentEditForm.profile_image_url && (
+                <div
+                  className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-4"
+                  onClick={() => setLightboxOpen(false)}
+                >
+                  <div className="relative max-w-xl w-full" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      onClick={() => setLightboxOpen(false)}
+                      className="absolute -top-3 -right-3 bg-white rounded-full p-1 shadow-lg z-10 hover:bg-slate-100"
+                    >
+                      <X size={20} />
+                    </button>
+                    <img
+                      src={studentEditForm.profile_image_url}
+                      alt={studentEditForm.full_name}
+                      className="w-full h-auto rounded-2xl shadow-2xl"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Status Confirm Modal */}
+              {statusConfirmOpen && (
+                <div
+                  className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"
+                  onClick={() => setStatusConfirmOpen(false)}
+                >
+                  <div
+                    className="bg-white rounded-2xl shadow-2xl p-6 max-w-md w-full"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <h3 className="font-semibold text-slate-900 mb-2">Change Status</h3>
+                    <p className="text-sm text-slate-600 mb-4">
+                      Move <strong>{selectedStudent?.full_name}</strong> from{' '}
+                      <strong>{studentEditForm.status}</strong> → <strong>{pendingStatus}</strong>
+                    </p>
+                    <label className="text-sm text-slate-600 block mb-4">
+                      Reason for change
+                      <input
+                        className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+                        placeholder="e.g. Completed orientation"
+                        value={statusTransitionReason}
+                        onChange={(e) => setStatusTransitionReason(e.target.value)}
+                      />
+                    </label>
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        type="button"
+                        className="px-4 py-2 text-sm rounded-lg bg-slate-100 hover:bg-slate-200"
+                        onClick={() => setStatusConfirmOpen(false)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={statusSaving}
+                        className="px-4 py-2 text-sm btn btn-primary disabled:opacity-50"
+                        onClick={async () => {
+                          if (!selectedStudent) return
+                          setStatusSaving(true)
+                          try {
+                            await apiClient.patch(`/students/${selectedStudent.id}/lifecycle-status`, {
+                              status: pendingStatus,
+                              reason: statusTransitionReason,
+                            })
+                            setStudentEditForm((prev) => ({ ...prev, status: pendingStatus }))
+                            // Refresh history
+                            const hRes = await apiClient.get(`/students/${selectedStudent.id}/status-history`)
+                            setStatusHistory(hRes.data || [])
+                            const nRes = await apiClient.get(`/students/${selectedStudent.id}/next-statuses`)
+                            setValidNextStatuses(nRes.data.nextStatuses || [])
+                            setStatusConfirmOpen(false)
+                          } finally {
+                            setStatusSaving(false)
+                          }
+                        }}
+                      >
+                        {statusSaving ? 'Saving…' : 'Confirm'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+                <div className="pt-3 border-t border-red-100">
+                  <button
+                    type="button"
+                    className="w-full btn btn-danger border border-red-200 rounded-lg py-2 text-sm font-medium hover:bg-red-100"
+                    onClick={async () => {
+                      if (!(await dialogConfirm(`${selectedStudent.full_name}'s profile, results and attendance will be permanently removed.`, { title: `Delete ${selectedStudent.full_name}?`, confirmLabel: 'Delete' }))) return
+                      await apiClient.delete(`/students/${selectedStudent.id}`)
+                      setAllStudents((prev) => prev.filter((s) => s.id !== selectedStudent.id))
+                      closeStudentPanel()
+                    }}
+                  >
+                    Delete Student
+                  </button>
+                </div>
+
+                <div className="pt-4 border-t border-slate-200 space-y-3">
+                  <h4 className="font-semibold text-slate-900">Course History & Notes</h4>
+                  {studentGraduationProgress ? (
+                    <div className="rounded-lg border border-slate-200 p-3 bg-slate-50 text-sm text-slate-700 space-y-1">
+                      <p>
+                        Completed: <span className="font-semibold">{studentGraduationProgress.passed.length}</span> / {studentGraduationProgress.total}
+                      </p>
+                      <p>
+                        Remaining: <span className="font-semibold">{studentGraduationProgress.notStarted.length + studentGraduationProgress.active.length + studentGraduationProgress.failed.length}</span>
+                      </p>
+                      <p>
+                        Failed: <span className="font-semibold text-red-600">{studentGraduationProgress.failed.length}</span>
+                      </p>
+                      {studentGraduationProgress.notStarted.length ? (
+                        <p className="text-xs text-slate-500">
+                          Not started: {studentGraduationProgress.notStarted.map((course) => course.course_code || course.title).join(', ')}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {loadingStudentHistory ? <p className="text-sm text-slate-500">Loading history...</p> : null}
+                  {studentHistory.enrollments.map((enrollment) => (
+                    <div key={enrollment.id} className="border rounded-lg p-3 space-y-2">
+                      <p className="text-sm font-medium text-slate-900">{enrollment.course_title} ({enrollment.course_code || '-'})</p>
+                      <p className="text-xs text-slate-500">Batch #{enrollment.batch_id} • {enrollment.start_date} - {enrollment.end_date} • {enrollment.status}</p>
+                      <p className="text-xs text-slate-500">Result: {enrollment.result_status || '-'} {enrollment.score !== null && enrollment.score !== undefined ? `(${enrollment.score})` : ''}</p>
+                      <textarea
+                        className="w-full border rounded-lg px-3 py-2 text-sm"
+                        rows={2}
+                        placeholder="Enrollment notes"
+                        value={enrollmentNotesEdits[enrollment.id] || ''}
+                        onChange={(event) => setEnrollmentNotesEdits((prev) => ({ ...prev, [enrollment.id]: event.target.value }))}
+                      />
+                      <button type="button" className="btn btn-primary px-3 py-2 text-sm" onClick={() => saveEnrollmentNote(enrollment.id)}>Save Note</button>
+                    </div>
+                  ))}
+
+                  <h4 className="font-semibold text-slate-900 pt-2">Activity Log</h4>
+                  <div className="max-h-40 overflow-auto space-y-2">
+                    {studentHistory.activities.map((activity, index) => (
+                      <div key={`${activity.action}-${activity.created_at}-${index}`} className="rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-700">
+                        <p className="font-medium">{activity.action}</p>
+                        <p>{new Date(activity.created_at).toLocaleString()}</p>
+                      </div>
+                    ))}
+                    {!studentHistory.activities.length ? <p className="text-sm text-slate-500">No activity yet.</p> : null}
+                  </div>
+
+                  {/* Unified Timeline */}
+                  {studentTimeline.length > 0 ? (
+                    <div className="pt-3 border-t border-slate-200">
+                      <h4 className="font-semibold text-slate-900 mb-3">Timeline</h4>
+                      <div className="space-y-2 max-h-60 overflow-auto">
+                        {studentTimeline.slice(0, 30).map((event) => (
+                          <div key={event.id} className="flex items-start gap-2.5 rounded-lg bg-slate-50 px-3 py-2">
+                            <div className="w-2 h-2 rounded-full mt-1.5 shrink-0 bg-slate-400" />
+                            <div className="min-w-0 flex-1">
+                              {event.type === 'status_transition' ? (
+                                <p className="text-xs text-slate-700">
+                                  Status: <span className="text-slate-500">{event.from_status}</span> →{' '}
+                                  <span className="font-medium text-slate-800">{event.to_status}</span>
+                                  {event.reason ? <span className="text-slate-400 italic"> ({event.reason})</span> : null}
+                                </p>
+                              ) : event.type === 'enrollment' ? (
+                                <p className="text-xs text-slate-700">
+                                  {event.auto_enrolled ? 'Auto-enrolled' : 'Enrolled'} in{' '}
+                                  <span className="font-medium text-slate-800">{event.course_title}</span>
+                                  {event.course_code ? <span className="text-slate-400"> ({event.course_code})</span> : null}
+                                  {event.result_status ? (
+                                    <span className={`ml-1 font-medium ${event.result_status === 'Pass' ? 'text-emerald-600' : 'text-red-600'}`}>
+                                      · {event.result_status}
+                                    </span>
+                                  ) : null}
+                                </p>
+                              ) : (
+                                <p className="text-xs text-slate-700">
+                                  <span className="font-medium">{event.action?.replace(/_/g, ' ')}</span>
+                                </p>
+                              )}
+                              <p className="text-[10px] text-slate-400 mt-0.5">
+                                {new Date(event.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                {event.actor ? <span> · by {event.actor}</span> : null}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </form>
+            </div>
+          ) : null}
+
+          {showBatchDrawer ? (
+            <div className="fixed inset-0 z-50 flex justify-end" onClick={() => setShowBatchDrawer(false)}>
+              <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" />
+              <div className="relative bg-white w-[420px] max-w-[92vw] h-full shadow-2xl flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                <div className="sticky top-0 bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between">
+                  <h3 className="font-semibold text-slate-900">Manage Student Batches</h3>
+                  <div className="flex items-center gap-2">
+                    <button type="button" onClick={persistCohortOrder} className="btn btn-primary px-3 py-2 text-xs">Save Order</button>
+                    <button type="button" onClick={() => setShowBatchDrawer(false)} className="rounded-lg p-1 hover:bg-slate-100">
+                      <X size={18} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex-1 min-h-0 overflow-auto p-4 space-y-3">
+                  {cohorts.map((cohort) => (
+                    <div
+                      key={cohort.id}
+                      draggable
+                      onDragStart={() => setDraggingCohortId(cohort.id)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={() => {
+                        moveCohortLocally(draggingCohortId, cohort.id)
+                        setDraggingCohortId(null)
+                      }}
+                      className="rounded-xl border border-slate-200 p-4"
+                    >
+                      {editingCohortId === cohort.id ? (
+                        <div className="space-y-2">
+                          <input
+                            className="w-full border rounded-lg px-2 py-1 text-sm"
+                            value={cohortEditForm.name}
+                            onChange={(event) => setCohortEditForm((prev) => ({ ...prev, name: event.target.value }))}
+                          />
+                          <div className="grid grid-cols-2 gap-2">
+                            <input
+                              type="date"
+                              className="w-full border rounded-lg px-2 py-1 text-sm"
+                              value={cohortEditForm.startDate || ''}
+                              onChange={(event) => setCohortEditForm((prev) => ({ ...prev, startDate: event.target.value }))}
+                            />
+                            <input
+                              type="date"
+                              className="w-full border rounded-lg px-2 py-1 text-sm"
+                              value={cohortEditForm.endDate || ''}
+                              onChange={(event) => setCohortEditForm((prev) => ({ ...prev, endDate: event.target.value }))}
+                            />
+                          </div>
+                          <select
+                            className="w-full border rounded-lg px-2 py-1 text-sm"
+                            value={cohortEditForm.status}
+                            onChange={(event) => setCohortEditForm((prev) => ({ ...prev, status: event.target.value }))}
+                          >
+                            <option value="upcoming">upcoming</option>
+                            <option value="active">active</option>
+                            <option value="completed">completed</option>
+                          </select>
+                          <div className="flex gap-2">
+                            <button type="button" className="btn btn-primary px-2 py-1 text-xs" onClick={() => saveCohortEdit(cohort.id)}>Save</button>
+                            <button type="button" className="btn btn-ghost btn-sm text-xs" onClick={() => setEditingCohortId(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-medium text-slate-900">{cohort.name}</p>
+                            <p className="text-xs text-slate-500">{fmtDateRange(cohort.start_date, cohort.end_date)}</p>
+                            <p className="text-xs text-slate-500">Status: {cohort.status} • Students: {cohort.student_count || 0}</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">Drag</span>
+                            <button type="button" className="btn btn-ghost btn-sm lift" onClick={() => startEditCohort(cohort)}>Edit</button>
+                            <button type="button" className="btn btn-danger btn-sm lift" onClick={() => deleteCohortSafely(cohort)}>Delete</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {!cohorts.length ? <p className="text-sm text-slate-500">No batches found.</p> : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+        )}
+      </div>
+      ) : null}
+
+          {showCreateStudentModal ? (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setShowCreateStudentModal(false)}>
+              <div className="bg-white rounded-[24px] shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden isolate" onClick={(e) => e.stopPropagation()}>
+                <div className="shrink-0 px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-white">
+                  <h3 className="font-display font-bold text-slate-900">Create Student</h3>
+                  <button type="button" onClick={() => setShowCreateStudentModal(false)} className="rounded-lg p-1 hover:bg-slate-100"><X size={18} /></button>
+                </div>
+                <form onSubmit={async (e) => { await createStudent(e); setShowCreateStudentModal(false) }} className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+                  <input className="w-full border rounded-lg px-3 py-2" placeholder="Full name" value={studentForm.fullName} onChange={(event) => setStudentForm((prev) => ({ ...prev, fullName: event.target.value }))} required />
+                  <input className="w-full border rounded-lg px-3 py-2" placeholder="Email" type="email" value={studentForm.email} onChange={(event) => setStudentForm((prev) => ({ ...prev, email: event.target.value }))} required />
+                  <input className="w-full border rounded-lg px-3 py-2" placeholder="Phone" value={studentForm.phone} onChange={(event) => setStudentForm((prev) => ({ ...prev, phone: event.target.value }))} required />
+                  <input className="w-full border rounded-lg px-3 py-2" placeholder="Matric Number (optional)" value={studentForm.matricNo} onChange={(event) => setStudentForm((prev) => ({ ...prev, matricNo: event.target.value }))} />
+                  <textarea className="w-full border rounded-lg px-3 py-2" placeholder="Comments" value={studentForm.comments} onChange={(event) => setStudentForm((prev) => ({ ...prev, comments: event.target.value }))} rows={3} />
+                  <select
+                    className="w-full border rounded-lg px-3 py-2"
+                    value={studentForm.status}
+                    onChange={(event) => setStudentForm((prev) => ({ ...prev, status: event.target.value }))}
+                  >
+                    <option value="Prospective">Prospective (applied, not yet active)</option>
+                    <option value="Active">Active</option>
+                    <option value="Graduating">Graduating</option>
+                    <option value="Graduated">Graduated</option>
+                    <option value="Alumni">Alumni</option>
+                  </select>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1 flex items-center gap-1.5">
+                      <KeyRound size={12} className="text-indigo-600" /> Password (optional)
+                    </label>
+                    <input
+                      className="w-full border rounded-lg px-3 py-2"
+                      type="text"
+                      placeholder={`Default: ${DEFAULT_STUDENT_PASSWORD}`}
+                      value={studentForm.password}
+                      onChange={(event) => setStudentForm((prev) => ({ ...prev, password: event.target.value }))}
+                    />
+                    <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg bg-indigo-50 border border-indigo-100 px-3 py-2">
+                      <p className="text-xs text-indigo-700 flex items-center gap-1.5">
+                        <KeyRound size={11} />
+                        Default sign-in password:
+                        <code className="font-mono font-semibold">{DEFAULT_STUDENT_PASSWORD}</code>
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => navigator.clipboard.writeText(DEFAULT_STUDENT_PASSWORD)}
+                        className="shrink-0 rounded-md p-1 text-indigo-600 hover:bg-white"
+                        title="Copy default password"
+                      >
+                        <Copy size={13} />
+                      </button>
+                    </div>
+                  </div>
+                  <select
+                    className="w-full border rounded-lg px-3 py-2"
+                    value={studentForm.cohortId || ''}
+                    onChange={(event) => setStudentForm((prev) => ({ ...prev, cohortId: event.target.value }))}
+                  >
+                    <option value="">Assign to batch (optional)</option>
+                    {cohorts.map((cohort) => (
+                      <option key={cohort.id} value={cohort.id}>
+                        {cohort.name} ({cohort.status})
+                      </option>
+                    ))}
+                  </select>
+                  <button className="w-full btn btn-primary py-2 lift">Create Student</button>
+                </form>
+              </div>
+            </div>
+          ) : null}
+          {showCreateBatchModal ? (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setShowCreateBatchModal(false)}>
+              <div className="bg-white rounded-[24px] shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden isolate" onClick={(e) => e.stopPropagation()}>
+                <div className="shrink-0 px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-white">
+                  <h3 className="font-display font-bold text-slate-900">Create Student Batch</h3>
+                  <button type="button" onClick={() => setShowCreateBatchModal(false)} className="rounded-lg p-1 hover:bg-slate-100"><X size={18} /></button>
+                </div>
+                <form onSubmit={async (e) => { await createStudentBatch(e); setShowCreateBatchModal(false) }} className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+                  <input
+                    className="w-full border rounded-lg px-3 py-2"
+                    placeholder="Batch name (e.g. February 2026)"
+                    value={cohortForm.name}
+                    onChange={(event) => setCohortForm((prev) => ({ ...prev, name: event.target.value }))}
+                    required
+                  />
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm text-slate-600 block">
+                      Start Date
+                      <input
+                        type="date"
+                        className="mt-1 w-full border rounded-lg px-3 py-2"
+                        value={cohortForm.startDate}
+                        onChange={(event) => setCohortForm((prev) => ({ ...prev, startDate: event.target.value }))}
+                        required
+                      />
+                    </label>
+                    <label className="text-sm text-slate-600 block">
+                      End Date
+                      <input
+                        type="date"
+                        className="mt-1 w-full border rounded-lg px-3 py-2"
+                        value={cohortForm.endDate}
+                        onChange={(event) => setCohortForm((prev) => ({ ...prev, endDate: event.target.value }))}
+                        required
+                      />
+                    </label>
+                  </div>
+                  <button className="w-full btn btn-primary py-2 lift">Create Batch</button>
+                </form>
+              </div>
+            </div>
+          ) : null}
+          {showStudentUploadModal ? (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setShowStudentUploadModal(false)}>
+              <div className="bg-white rounded-[24px] shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden isolate" onClick={(e) => e.stopPropagation()}>
+                <div className="shrink-0 px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-white">
+                  <h3 className="font-semibold text-slate-900">Upload Students (Excel/CSV)</h3>
+                  <button type="button" onClick={() => setShowStudentUploadModal(false)} className="rounded-lg p-1 hover:bg-slate-100"><X size={18} /></button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm text-slate-500">Bulk import via spreadsheet</p>
+                    <button
+                      type="button"
+                      onClick={() => downloadTemplate('students')}
+                      className="text-xs text-slate-500 underline"
+                    >
+                      Download Template
+                    </button>
+                  </div>
+                  <input type="file" accept=".xlsx,.xls,.csv" onChange={(event) => setStudentUploadFile(event.target.files?.[0] || null)} className="w-full border rounded-lg px-3 py-2" />
+                  <button onClick={async () => { await uploadStudents(); setShowStudentUploadModal(false) }} disabled={!studentUploadFile} className="w-full btn btn-primary py-2 disabled:opacity-50 lift flex items-center justify-center gap-2">
+                    <Upload size={16} /> Upload List
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {showCreateCourseModal ? (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setShowCreateCourseModal(false)}>
+              <div className="bg-white rounded-[24px] shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden isolate" onClick={(e) => e.stopPropagation()}>
+                <div className="shrink-0 px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-white">
+                  <h3 className="font-display font-bold text-slate-900 tracking-tight">Create Course</h3>
+                  <button type="button" onClick={() => setShowCreateCourseModal(false)} className="rounded-lg p-1 hover:bg-slate-100"><X size={18} /></button>
+                </div>
+                <form onSubmit={async (e) => { await createCourse(e); setShowCreateCourseModal(false) }} className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+                  <label className="text-sm text-slate-600 block">
+                    Course Title
+                    <input className="mt-1 w-full border rounded-lg px-3 py-2" placeholder="Course title" value={courseForm.title} onChange={(event) => setCourseForm((prev) => ({ ...prev, title: event.target.value }))} required />
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Course Code
+                    <input className="mt-1 w-full border rounded-lg px-3 py-2" placeholder="e.g. GTS101" value={courseForm.courseCode} onChange={(event) => setCourseForm((prev) => ({ ...prev, courseCode: event.target.value }))} />
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Lecturer
+                    <select className="mt-1 w-full border rounded-lg px-3 py-2" value={courseForm.lecturerName} onChange={(event) => setCourseForm((prev) => ({ ...prev, lecturerName: event.target.value }))}>
+                      <option value="">— No lecturer —</option>
+                      {lecturers.map((l) => (
+                        <option key={l.id} value={l.name}>{l.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Secondary Lecturer
+                    <select className="mt-1 w-full border rounded-lg px-3 py-2" value={courseForm.secondaryLecturerId || ''} onChange={(event) => setCourseForm((prev) => ({ ...prev, secondaryLecturerId: event.target.value || null }))}>
+                      <option value="">— No secondary lecturer —</option>
+                      {lecturers.map((l) => (
+                        <option key={l.id} value={l.id}>{l.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Duration (weeks)
+                    <input className="mt-1 w-full border rounded-lg px-3 py-2" type="number" min="1" value={courseForm.durationWeeks} onChange={(event) => setCourseForm((prev) => ({ ...prev, durationWeeks: Number(event.target.value) }))} required />
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Minimum Attendance Required
+                    <input className="mt-1 w-full border rounded-lg px-3 py-2" type="number" min="0" value={courseForm.minAttendanceRequired} onChange={(event) => setCourseForm((prev) => ({ ...prev, minAttendanceRequired: Number(event.target.value) }))} required />
+                  </label>
+                  <div className="border rounded-xl p-4 space-y-3">
+                    <p className="text-sm font-medium text-slate-700">Course Features</p>
+                    <label className="flex items-center gap-3 text-sm text-slate-700 cursor-pointer">
+                      <input type="checkbox" className="w-4 h-4 rounded" checked={courseForm.hasAssignment} onChange={(e) => setCourseForm((prev) => ({ ...prev, hasAssignment: e.target.checked }))} />
+                      Has Assignments
+                    </label>
+                    <label className="flex items-center gap-3 text-sm text-slate-700 cursor-pointer">
+                      <input type="checkbox" className="w-4 h-4 rounded" checked={courseForm.hasExam} onChange={(e) => setCourseForm((prev) => ({ ...prev, hasExam: e.target.checked }))} />
+                      Has Exam
+                    </label>
+                  </div>
+                  <button className="w-full btn btn-primary py-2 lift">Save Course</button>
+                </form>
+              </div>
+            </div>
+          ) : null}
+          {showCourseBulkModal ? (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setShowCourseBulkModal(false)}>
+              <div className="bg-white rounded-[24px] shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden isolate" onClick={(e) => e.stopPropagation()}>
+                <div className="shrink-0 px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-white">
+                  <h3 className="font-display font-bold text-slate-900 tracking-tight">Bulk Upload Courses</h3>
+                  <button type="button" onClick={() => setShowCourseBulkModal(false)} className="rounded-lg p-1 hover:bg-slate-100"><X size={18} /></button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm text-slate-500">Bulk import via spreadsheet</p>
+                    <button type="button" onClick={() => downloadTemplate('courses')} className="text-xs text-slate-500 underline">Download Template</button>
+                  </div>
+                  <input type="file" accept=".xlsx,.xls" onChange={(e) => setCourseUploadFile(e.target.files?.[0] || null)} className="w-full border rounded-lg px-3 py-2" />
+                  <button onClick={async () => { await uploadCourses(); setShowCourseBulkModal(false) }} disabled={!courseUploadFile} className="w-full btn btn-primary py-2 disabled:opacity-50 lift flex items-center justify-center gap-2"><Upload size={16} /> Upload Courses</button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {editingCohortId ? (
+            <div className="fixed inset-0 z-50 flex justify-end" onClick={() => setEditingCohortId(null)}>
+              <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" />
+              <div className="relative bg-white w-[420px] max-w-[92vw] h-full shadow-2xl flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                <div className="shrink-0 px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                  <h3 className="font-semibold text-slate-900">Edit Batch</h3>
+                  <button type="button" onClick={() => setEditingCohortId(null)} className="rounded-lg p-1 hover:bg-slate-100"><X size={18} /></button>
+                </div>
+                <div className="p-5 space-y-3 overflow-y-auto flex-1">
+                  <input
+                    className="w-full border rounded-lg px-3 py-2"
+                    value={cohortEditForm.name}
+                    onChange={(event) => setCohortEditForm((prev) => ({ ...prev, name: event.target.value }))}
+                    placeholder="Batch name"
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="date"
+                      className="w-full border rounded-lg px-3 py-2"
+                      value={cohortEditForm.startDate || ''}
+                      onChange={(event) => setCohortEditForm((prev) => ({ ...prev, startDate: event.target.value }))}
+                    />
+                    <input
+                      type="date"
+                      className="w-full border rounded-lg px-3 py-2"
+                      value={cohortEditForm.endDate || ''}
+                      onChange={(event) => setCohortEditForm((prev) => ({ ...prev, endDate: event.target.value }))}
+                    />
+                  </div>
+                  <select
+                    className="w-full border rounded-lg px-3 py-2"
+                    value={cohortEditForm.status}
+                    onChange={(event) => setCohortEditForm((prev) => ({ ...prev, status: event.target.value }))}
+                  >
+                    <option value="upcoming">upcoming</option>
+                    <option value="active">active</option>
+                    <option value="completed">completed</option>
+                  </select>
+                  <div className="flex gap-2 pt-2">
+                    <button type="button" className="flex-1 btn btn-primary btn-sm lift" onClick={() => { saveCohortEdit(editingCohortId); setEditingCohortId(null) }}>Save</button>
+                    <button type="button" className="flex-1 btn btn-ghost btn-sm lift" onClick={() => setEditingCohortId(null)}>Cancel</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+      {section === 'batches' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          {/* Header / filters — shrink-0 */}
+          <div className="shrink-0 flex flex-wrap items-center justify-between gap-3">
+            <h3 className="font-semibold text-slate-900">Student Batches</h3>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex gap-0.5 bg-slate-100 rounded-xl p-1">
+                {[
+                  { key: 'active', label: 'Active' },
+                  { key: 'upcoming', label: 'Upcoming' },
+                  { key: 'completed', label: 'Completed' },
+                  { key: 'all', label: 'All' },
+                ].map(({ key, label }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setBatchViewFilter(key)}
+                    className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
+                      batchViewFilter === key ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button type="button" onClick={persistCohortOrder} className="btn btn-primary btn-sm lift">
+                Save Order
+              </button>
+              <button type="button" onClick={() => setShowCreateBatchModal(true)} className="btn btn-primary btn-sm lift inline-flex items-center gap-1.5">
+                <Plus size={14} /> Create Batch
+              </button>
+            </div>
+          </div>
+
+          {/* Yardstick table container — fills page, table scrolls inside */}
+          <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-auto">
+              {(() => {
+                const COHORT_STATUS_STYLES = {
+                  active: 'bg-emerald-100 text-emerald-700',
+                  upcoming: 'bg-sky-100 text-indigo-700',
+                  completed: 'bg-slate-100 text-slate-500',
+                }
+                const matrixStudentById = Object.fromEntries(
+                  (graduationMatrix.students || []).map((s) => [s.id, s])
+                )
+                const filtered = batchViewFilter === 'all'
+                  ? cohorts
+                  : cohorts.filter((c) => c.status === batchViewFilter)
+
+                if (!filtered.length) {
+                  return (
+                    <p className="text-sm text-slate-400 py-8 text-center">
+                      No {batchViewFilter === 'all' ? '' : batchViewFilter + ' '}batches found.
+                    </p>
+                  )
+                }
+
+                return (
+                  <table className="data-table w-full text-sm">
+                    <thead className="sticky top-0 bg-white z-10">
+                      <tr className="border-b border-slate-200 text-left text-slate-500">
+                        <th className="py-3 px-4 font-medium">Batch</th>
+                        <th className="py-3 px-3 font-medium">Dates</th>
+                        <th className="py-3 px-3 font-medium">Status</th>
+                        <th className="py-3 px-3 font-medium text-center">Students</th>
+                        <th className="py-3 px-3 font-medium text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtered.map((cohort) => {
+                        const cohortStudents = allStudents.filter((s) => s.cohort_id === cohort.id)
+                        const isExpanded = expandedCohortIds.has(cohort.id)
+                        const retakeCount = cohortStudents.filter((s) => (matrixStudentById[s.id]?.failed || 0) > 0).length
+                        return (
+                          <React.Fragment key={cohort.id}>
+                            <tr
+                              draggable
+                              onDragStart={() => setDraggingCohortId(cohort.id)}
+                              onDragOver={(event) => event.preventDefault()}
+                              onDrop={() => {
+                                moveCohortLocally(draggingCohortId, cohort.id)
+                                setDraggingCohortId(null)
+                              }}
+                              className="border-t border-slate-100 hover:bg-slate-50"
+                            >
+                              <td className="py-3 px-4">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-medium text-slate-900">{cohort.name}</span>
+                                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${COHORT_STATUS_STYLES[cohort.status] || 'bg-slate-100 text-slate-500'}`}>
+                                    {cohort.status}
+                                  </span>
+                                  {retakeCount > 0 ? (
+                                    <span className="rounded-full bg-amber-100 text-amber-700 px-2 py-0.5 text-xs font-medium">
+                                      {retakeCount} need retake
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3 text-slate-600 text-xs whitespace-nowrap">{fmtDateRange(cohort.start_date, cohort.end_date)}</td>
+                              <td className="py-3 px-3">
+                                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${COHORT_STATUS_STYLES[cohort.status] || 'bg-slate-100 text-slate-500'}`}>
+                                  {cohort.status}
+                                </span>
+                              </td>
+                              <td className="py-3 px-3 text-center text-slate-700">{cohortStudents.length}</td>
+                              <td className="py-3 px-3">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost btn-sm lift"
+                                    onClick={() =>
+                                      setExpandedCohortIds((prev) => {
+                                        const next = new Set(prev)
+                                        next.has(cohort.id) ? next.delete(cohort.id) : next.add(cohort.id)
+                                        return next
+                                      })
+                                    }
+                                  >
+                                    {isExpanded ? 'Hide' : 'View'}
+                                  </button>
+                                  <button type="button" className="btn btn-ghost btn-sm lift" onClick={() => startEditCohort(cohort)}>Edit</button>
+                                  <button type="button" className="btn btn-danger btn-sm lift" onClick={() => deleteCohortSafely(cohort)}>Delete</button>
+                                </div>
+                              </td>
+                            </tr>
+                            {isExpanded ? (
+                              <tr key={`${cohort.id}-expanded`} className="border-t border-slate-100 bg-slate-50/50">
+                                <td colSpan={5} className="px-4 py-3">
+                                  {cohortStudents.length === 0 ? (
+                                    <p className="text-xs text-slate-400">No students assigned to this batch yet.</p>
+                                  ) : (
+                                    <div className="space-y-1">
+                                      {cohortStudents.map((student) => {
+                                        const mx = matrixStudentById[student.id]
+                                        const needsRetake = (mx?.failed || 0) > 0
+                                        const inProgress = (mx?.enrolled_active || 0) > 0
+                                        const pct = mx?.completion_pct ?? 0
+                                        return (
+                                          <div key={student.id} className="flex items-center justify-between gap-3 rounded-lg bg-white border border-slate-100 px-3 py-2">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                              <Link to={`/lecturer/students/${student.id}`} className="text-sm font-medium text-slate-900 hover:underline truncate">
+                                                {student.full_name}
+                                              </Link>
+                                              <span className="text-xs text-slate-400 shrink-0">{student.matric_no}</span>
+                                            </div>
+                                            <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                                              <span className="text-xs text-slate-500">{pct}%</span>
+                                              {needsRetake ? (
+                                                <span className="rounded-full bg-amber-100 text-amber-700 px-2 py-0.5 text-xs font-medium">Retake needed ({mx.failed})</span>
+                                              ) : null}
+                                              {inProgress && !needsRetake ? (
+                                                <span className="rounded-full bg-sky-100 text-indigo-700 px-2 py-0.5 text-xs">In progress</span>
+                                              ) : null}
+                                              {!mx || (pct === 0 && !inProgress && !needsRetake) ? (
+                                                <span className="rounded-full bg-slate-100 text-slate-500 px-2 py-0.5 text-xs">Not started</span>
+                                              ) : pct === 100 ? (
+                                                <span className="rounded-full bg-emerald-100 text-emerald-700 px-2 py-0.5 text-xs font-medium">✓ Complete</span>
+                                              ) : null}
+                                              <span className={`rounded-full px-2 py-0.5 text-xs ${student.status === 'Active' ? 'bg-emerald-50 text-emerald-600' : student.status === 'Graduating' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}`}>{student.status}</span>
+                                            </div>
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            ) : null}
+                          </React.Fragment>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                )
+              })()}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Quick Status Change Modal */}
+      {showQuickStatus && quickStatusStudent ? (
+        <div
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setShowQuickStatus(false)}
+        >
+          <div
+            className="bg-white rounded-[24px] shadow-2xl max-w-md w-full max-h-[90vh] flex flex-col overflow-hidden isolate"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="shrink-0 px-6 py-4 border-b border-slate-100 bg-white">
+              <h3 className="font-semibold text-slate-900">Change Status</h3>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+              <p className="text-sm text-slate-500">
+                <strong>{quickStatusStudent.full_name}</strong> ({quickStatusStudent.status})
+              </p>
+            <p className="text-sm text-slate-500 mb-4">
+              <strong>{quickStatusStudent.full_name}</strong> ({quickStatusStudent.status})
+            </p>
+
+            {!quickSelectedStatus ? (
+              <>
+                <p className="text-xs font-medium text-slate-600 mb-2">Select new status:</p>
+                <div className="flex flex-wrap gap-1.5 mb-4">
+                  {quickStatusOptions.map((s) => {
+                    const tm = { Active: 'emerald', Prospective: 'amber', Graduating: 'gold', Graduated: 'sky', Alumni: 'slate', 'On Hold': 'amber', Suspended: 'rose', Applied: 'slate', 'Under Review': 'amber', Accepted: 'sky' }
+                    return (
+                    <button key={s} type="button" onClick={() => setQuickSelectedStatus(s)} className="hover:scale-[1.02] transition-transform">
+                      <Badge tone={tm[s] || 'slate'} dot>{s}</Badge>
+                    </button>
+                  )})}
+                  {quickStatusOptions.length === 0 && (
+                    <p className="text-xs text-slate-400">No valid next statuses available.</p>
+                  )}
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <button
+                    type="button"
+                    className="px-4 py-2 text-sm rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => setShowQuickStatus(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-slate-600 mb-4">
+                  Move from <strong>{quickStatusStudent.status}</strong> →{' '}
+                  <Badge tone={{ Active: 'emerald', Prospective: 'amber', Graduating: 'gold', Graduated: 'sky', Alumni: 'slate' }[quickSelectedStatus] || 'slate'} dot>{quickSelectedStatus}</Badge>
+                </p>
+                <label className="text-sm text-slate-600 block mb-4">
+                  Reason for change
+                  <input
+                    className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+                    placeholder="e.g. Completed orientation"
+                    value={quickStatusReason}
+                    onChange={(e) => setQuickStatusReason(e.target.value)}
+                    autoFocus
+                  />
+                </label>
+                <div className="flex gap-2 justify-end">
+                  <button
+                    type="button"
+                    className="px-4 py-2 text-sm rounded-lg bg-slate-100 hover:bg-slate-200"
+                    onClick={() => setQuickSelectedStatus(null)}
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    disabled={quickStatusSaving}
+                    className="px-4 py-2 text-sm btn btn-primary disabled:opacity-50"
+                    onClick={async () => {
+                      setQuickStatusSaving(true)
+                      try {
+                        await apiClient.patch(`/students/${quickStatusStudent.id}/lifecycle-status`, {
+                          status: quickSelectedStatus,
+                          reason: quickStatusReason || null,
+                        })
+                        await Promise.all([loadAllStudents(), loadGraduationMatrix(), loadGraduationSets()])
+                        setShowQuickStatus(false)
+                        notify(`Status changed to ${quickSelectedStatus}`)
+                      } catch (err) {
+                        notify(err?.response?.data?.message || 'Failed to update status')
+                      } finally {
+                        setQuickStatusSaving(false)
+                      }
+                    }}
+                  >
+                    {quickStatusSaving ? 'Saving…' : 'Confirm'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showGradReport ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-[24px] shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden isolate">
+            <div className="shrink-0 px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-display font-bold text-slate-900">Graduation Report</h3>
+                <p className="text-sm text-slate-500 mt-0.5">Generated {new Date().toLocaleString()}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5"
+                >
+                  <Printer size={14} /> Print
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadGraduationReport}
+                  className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5"
+                >
+                  <Download size={14} /> Download Excel
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadGraduationReportPdf}
+                  className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5"
+                >
+                  <Download size={14} /> Download PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowGradReport(false)}
+                  className="rounded-lg p-1 hover:bg-slate-100"
+                  aria-label="Close"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto p-6">
+              <div className="report-print text-slate-900">
+                {/* Masthead */}
+                <div className="text-center pb-6 mb-6 border-b border-slate-200">
+                  <p className="text-xs uppercase tracking-[0.3em] text-slate-500">{schoolInfo.school_name || 'Grace Theological Seminary'}</p>
+                  <h2 className="font-display font-bold text-2xl mt-2">Graduation Report</h2>
+                  <p className="text-sm text-slate-500 mt-1">Generated {new Date().toLocaleString()}</p>
+                  <p className="text-xs text-slate-500 mt-1">Filters: {gradReportFilterSummary}</p>
+                  <div className="mt-5 grid grid-cols-3 gap-3 max-w-xl mx-auto">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                      <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">Graduates</p>
+                      <p className="font-display font-bold text-xl mt-0.5">{gradReportStats.graduates}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                      <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">Total Courses</p>
+                      <p className="font-display font-bold text-xl mt-0.5">{gradReportStats.totalCourses}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                      <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">Courses Passed</p>
+                      <p className="font-display font-bold text-xl mt-0.5">{gradReportStats.coursesPassed}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {filteredGraduationStudents.length === 0 ? (
+                  <div className="text-center py-10 text-sm text-slate-500">
+                    No students match the current filters.
+                  </div>
+                ) : (
+                  <>
+                    {/* Section 1 — Graduates */}
+                    <section className="mb-8">
+                      <h4 className="font-display font-bold text-lg mb-3">Graduates</h4>
+                      <div className="overflow-x-auto rounded-xl border border-slate-200">
+                        <table className="w-full text-sm border-collapse">
+                          <thead>
+                            <tr className="bg-slate-50">
+                              <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">S/N</th>
+                              <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Matric No</th>
+                              <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Full Name</th>
+                              <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Batch</th>
+                              <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Status</th>
+                              <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Courses Passed</th>
+                              <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Progress %</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredGraduationStudents.map((student, index) => {
+                              const statusTone =
+                                student.status === 'Graduated' ? 'bg-emerald-100 text-emerald-700'
+                                : student.status === 'Alumni' ? 'bg-indigo-100 text-indigo-700'
+                                : student.status === 'Graduating' ? 'bg-amber-100 text-amber-700'
+                                : student.status === 'Active' ? 'bg-sky-100 text-sky-700'
+                                : 'bg-slate-100 text-slate-600'
+                              return (
+                                <tr key={student.id} className="even:bg-slate-50">
+                                  <td className="px-3 py-2 border-b border-slate-100 text-slate-700">{index + 1}</td>
+                                  <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{student.matric_no || '—'}</td>
+                                  <td className="px-3 py-2 border-b border-slate-100 text-slate-900 font-medium">{student.full_name}</td>
+                                  <td className="px-3 py-2 border-b border-slate-100 text-slate-700">{student.cohort_name || '—'}</td>
+                                  <td className="px-3 py-2 border-b border-slate-100">
+                                    <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${statusTone}`}>{student.status || '—'}</span>
+                                  </td>
+                                  <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{student.passed || 0} of {student.total || gradReportStats.totalCourses}</td>
+                                  <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{student.completion_pct ?? 0}%</td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </section>
+
+                    {/* Section 2 — Courses Taken */}
+                    <section>
+                      <h4 className="font-display font-bold text-lg mb-3">Courses Taken</h4>
+                      {filteredGraduationStudents.map((student) => {
+                        const taken = graduationMatrix.courses.filter((course) => {
+                          const info = student.courses?.[course.id]
+                          if (!info) return false
+                          return Boolean(info.result_status) || info.enrollment_status === 'active'
+                        })
+                        if (taken.length === 0) return null
+                        return (
+                          <div key={student.id} className="mb-6">
+                            <div className="flex items-baseline justify-between gap-3 mb-2 pb-1.5 border-b border-slate-200">
+                              <span className="font-semibold text-slate-900">{student.full_name}</span>
+                              <span className="text-xs text-slate-500">
+                                {student.matric_no || '—'}
+                                {student.cohort_name ? ` · ${student.cohort_name}` : ''}
+                              </span>
+                            </div>
+                            <div className="overflow-x-auto rounded-xl border border-slate-200">
+                              <table className="w-full text-sm border-collapse">
+                                <thead>
+                                  <tr className="bg-slate-50">
+                                    <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Course Code</th>
+                                    <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Course Title</th>
+                                    <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Result</th>
+                                    <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Score</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {taken.map((course) => {
+                                    const info = student.courses[course.id]
+                                    const isPass = info.result_status === 'Pass'
+                                    const isFail = info.result_status === 'Fail'
+                                    const resultLabel = isPass ? 'Pass' : isFail ? 'Fail' : info.result_status || 'In Progress'
+                                    const resultTone = isPass ? 'bg-emerald-100 text-emerald-700' : isFail ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
+                                    const hasScore = info.score !== null && info.score !== undefined && info.score !== ''
+                                    return (
+                                      <tr key={course.id} className="even:bg-slate-50">
+                                        <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{course.course_code || '—'}</td>
+                                        <td className="px-3 py-2 border-b border-slate-100 text-slate-900">{course.title}</td>
+                                        <td className="px-3 py-2 border-b border-slate-100">
+                                          <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${resultTone}`}>{resultLabel}</span>
+                                        </td>
+                                        <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{hasScore ? info.score : '—'}</td>
+                                      </tr>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </section>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Graduating set editor modal ───────────────────────────── */}
+      {setEditor ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={() => setSetEditor(null)}>
+          <div className="bg-white rounded-[24px] shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden isolate" onClick={(e) => e.stopPropagation()}>
+            <div className="shrink-0 px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-display font-bold text-slate-900">{setEditor.mode === 'create' ? 'New Graduating Set' : 'Edit Graduating Set'}</h3>
+                <p className="text-sm text-slate-500 mt-0.5">Group graduating students with the courses they must complete.</p>
+              </div>
+              <button type="button" onClick={() => setSetEditor(null)} className="rounded-lg p-1 hover:bg-slate-100" aria-label="Close">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto p-6">
+              <div className="grid lg:grid-cols-[360px_1fr] gap-6">
+                {/* Left — set meta */}
+                <div className="space-y-4">
+                  <label className="text-sm text-slate-600 block">
+                    Set Name <span className="text-red-500">*</span>
+                    <input
+                      type="text"
+                      className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2"
+                      value={setEditor.name}
+                      onChange={(event) => setSetEditor((prev) => ({ ...prev, name: event.target.value }))}
+                      placeholder="e.g. May 2026 Graduating Set"
+                    />
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Graduation Date
+                    <input
+                      type="date"
+                      className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2"
+                      value={setEditor.graduation_date || ''}
+                      onChange={(event) => setSetEditor((prev) => ({ ...prev, graduation_date: event.target.value }))}
+                    />
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Description
+                    <textarea
+                      rows={4}
+                      className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2"
+                      value={setEditor.description || ''}
+                      onChange={(event) => setSetEditor((prev) => ({ ...prev, description: event.target.value }))}
+                      placeholder="Optional notes about this set"
+                    />
+                  </label>
+                  {setEditor.mode === 'edit' ? (
+                    <label className="text-sm text-slate-600 block">
+                      Status
+                      <select
+                        className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2"
+                        value={setEditor.status || 'active'}
+                        onChange={(event) => setSetEditor((prev) => ({ ...prev, status: event.target.value }))}
+                      >
+                        <option value="active">Active</option>
+                        <option value="completed">Completed</option>
+                        <option value="archived">Archived</option>
+                      </select>
+                    </label>
+                  ) : null}
+                  <div className="rounded-xl bg-slate-100 px-4 py-3 text-xs text-slate-600 leading-relaxed">
+                    {setEditor.mode === 'create'
+                      ? 'Course and student selections are submitted when you create the set.'
+                      : 'Course and student changes are saved immediately.'}
+                  </div>
+                </div>
+
+                {/* Right — courses + students */}
+                <div className="space-y-6">
+                  <div className="card flex flex-col overflow-hidden min-h-[220px] max-h-[38vh]">
+                    <div className="shrink-0 px-4 py-3 border-b border-slate-100 bg-white flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-semibold text-slate-900 text-sm">Set Courses</h4>
+                        <span className="text-xs bg-indigo-50 text-indigo-700 rounded-full px-2.5 py-1 font-medium">{setEditor.courseIds.length} selected</span>
+                      </div>
+                      <div className="relative w-56">
+                        <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Search courses…"
+                          value={setEditor.searchCourses || ''}
+                          onChange={(event) => setSetEditor((prev) => ({ ...prev, searchCourses: event.target.value }))}
+                          className="w-full border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100">
+                      {setEditorCourseOptions.length === 0 ? (
+                        <p className="px-4 py-6 text-sm text-slate-500 text-center">No courses match your search.</p>
+                      ) : setEditorCourseOptions.map((course) => {
+                        const selected = setEditor.courseIds.includes(Number(course.id))
+                        return (
+                          <button
+                            key={course.id}
+                            type="button"
+                            onClick={() => toggleSetCourse(course)}
+                            className={`w-full text-left px-4 py-2.5 flex items-center gap-3 cursor-pointer hover:bg-slate-50 ${selected ? 'bg-indigo-50/60' : ''}`}
+                          >
+                            <span className={`shrink-0 w-4 h-4 rounded border flex items-center justify-center ${selected ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-300'}`}>
+                              {selected ? <span className="text-white text-[10px] leading-none font-bold">✓</span> : null}
+                            </span>
+                            <span className="font-mono text-xs text-slate-500 whitespace-nowrap">{course.course_code || '—'}</span>
+                            <span className="text-sm text-slate-900 flex-1 truncate">{course.title}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="card flex flex-col overflow-hidden min-h-[260px] max-h-[46vh]">
+                    <div className="shrink-0 px-4 py-3 border-b border-slate-100 bg-white flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-semibold text-slate-900 text-sm">Graduating Students</h4>
+                        <span className="text-xs bg-indigo-50 text-indigo-700 rounded-full px-2.5 py-1 font-medium">{setEditor.members.length} selected</span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="relative w-48">
+                          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="Search name or matric…"
+                            value={setEditor.studentSearch || ''}
+                            onChange={(event) => setSetEditor((prev) => ({ ...prev, studentSearch: event.target.value }))}
+                            className="w-full border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                          />
+                        </div>
+                        <select
+                          value={setEditor.studentStatusFilter || ''}
+                          onChange={(event) => setSetEditor((prev) => ({ ...prev, studentStatusFilter: event.target.value }))}
+                          className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs bg-white"
+                        >
+                          <option value="">All Statuses</option>
+                          <option value="Graduating">Graduating</option>
+                          <option value="Graduated">Graduated</option>
+                          <option value="Active">Active</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100">
+                      {setEditorStudentOptions.length === 0 ? (
+                        <p className="px-4 py-6 text-sm text-slate-500 text-center">No students match the current filters.</p>
+                      ) : setEditorStudentOptions.map((student) => (
+                        <button
+                          key={student.id}
+                          type="button"
+                          disabled={setEditorSaving}
+                          onClick={() => addSetStudent(student)}
+                          className="w-full text-left px-4 py-2.5 flex items-center gap-3 hover:bg-slate-50 disabled:opacity-50 cursor-pointer"
+                        >
+                          <span className="shrink-0 w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-semibold">+</span>
+                          <span className="flex-1 min-w-0">
+                            <span className="block text-sm text-slate-900 truncate">{student.full_name}</span>
+                            <span className="block text-xs text-slate-500">{student.matric_no || '—'}</span>
+                          </span>
+                          <span className={`shrink-0 inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_COLORS[student.status] || 'bg-slate-100 text-slate-600'}`}>
+                            {student.status || '—'}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    {setEditor.members.length > 0 ? (
+                      <div className="shrink-0 border-t border-slate-100 bg-slate-50/60 max-h-[170px] overflow-y-auto divide-y divide-slate-100">
+                        <div className="px-4 py-2 text-[0.68rem] uppercase tracking-[0.08em] text-slate-500 font-semibold sticky top-0 bg-slate-50">
+                          Selected ({setEditor.members.length})
+                        </div>
+                        {setEditor.members.map((member) => (
+                          <div key={member.id} className="px-4 py-2 flex items-center gap-3">
+                            <span className="flex-1 min-w-0">
+                              <span className="block text-sm text-slate-900 truncate">{member.full_name}</span>
+                              <span className="block text-xs text-slate-500">{member.matric_no || '—'}</span>
+                            </span>
+                            <span className={`shrink-0 inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_COLORS[member.status] || 'bg-slate-100 text-slate-600'}`}>
+                              {member.status || '—'}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={setEditorSaving}
+                              onClick={() => removeSetStudent(member.id)}
+                              className="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-white hover:text-red-600 disabled:opacity-40"
+                              aria-label={`Remove ${member.full_name}`}
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="shrink-0 px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-500">
+                {setEditor.courseIds.length} course{setEditor.courseIds.length !== 1 ? 's' : ''} · {setEditor.members.length} student{setEditor.members.length !== 1 ? 's' : ''}
+              </p>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => setSetEditor(null)} className="btn btn-ghost btn-sm lift">
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveSetEditor}
+                  disabled={!setEditor.name.trim() || setEditorSaving}
+                  className="btn btn-primary btn-sm lift disabled:opacity-50"
+                >
+                  {setEditorSaving ? 'Saving…' : setEditor.mode === 'create' ? 'Create Set' : 'Done'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Graduating set report modal ───────────────────────────── */}
+      {showSetReport ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-[24px] shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden isolate">
+            <div className="shrink-0 px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-display font-bold text-slate-900">Graduation Report — {showSetReport.name}</h3>
+                <p className="text-sm text-slate-500 mt-0.5">
+                  {setReportDataLoading ? 'Loading report…' : `Generated ${new Date().toLocaleString()}`}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  disabled={setReportDataLoading}
+                  className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Printer size={14} /> Print
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadSetReportFile('pdf')}
+                  disabled={setReportDataLoading}
+                  className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Download size={14} /> Download PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadSetReportFile('xlsx')}
+                  disabled={setReportDataLoading}
+                  className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Download size={14} /> Download Excel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowSetReport(null); setSetReportData(null) }}
+                  className="rounded-lg p-1 hover:bg-slate-100"
+                  aria-label="Close"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto p-6">
+              {setReportDataLoading ? (
+                <div className="text-center py-16 text-sm text-slate-500">Loading graduation report…</div>
+              ) : !setReportData ? (
+                <div className="text-center py-16 text-sm text-slate-500">Unable to load the report for this set.</div>
+              ) : (
+                <div className="report-print text-slate-900">
+                  {/* Masthead */}
+                  <div className="text-center pb-6 mb-6 border-b border-slate-200">
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-500">{schoolInfo.school_name || 'Grace Theological Seminary'}</p>
+                    <h2 className="font-display font-bold text-2xl mt-2">{setReportData.name}</h2>
+                    <p className="text-sm text-slate-500 mt-1">Generated {new Date().toLocaleString()}</p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Graduation date: {setReportData.graduation_date ? fmtDate(setReportData.graduation_date) : 'Not set'}
+                      {' · '}Status: {setReportData.status ? setReportData.status.charAt(0).toUpperCase() + setReportData.status.slice(1) : '—'}
+                    </p>
+                    <div className="mt-5 grid grid-cols-3 gap-3 max-w-xl mx-auto">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                        <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">Members</p>
+                        <p className="font-display font-bold text-xl mt-0.5">{setReportDataStats.members}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                        <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">Set Courses</p>
+                        <p className="font-display font-bold text-xl mt-0.5">{setReportDataStats.courses}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                        <p className="text-[0.65rem] uppercase tracking-wide text-slate-500">Total Passes</p>
+                        <p className="font-display font-bold text-xl mt-0.5">{setReportDataStats.totalPasses}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {(setReportData.members || []).length === 0 ? (
+                    <div className="text-center py-10 text-sm text-slate-500">
+                      No students in this set yet.
+                    </div>
+                  ) : (
+                    <>
+                      {/* Section 1 — Graduates */}
+                      <section className="mb-8">
+                        <h4 className="font-display font-bold text-lg mb-3">Graduates</h4>
+                        <div className="overflow-x-auto rounded-xl border border-slate-200">
+                          <table className="w-full text-sm border-collapse">
+                            <thead>
+                              <tr className="bg-slate-50">
+                                <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">S/N</th>
+                                <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Matric No</th>
+                                <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Full Name</th>
+                                <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Batch</th>
+                                <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Status</th>
+                                <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Courses Passed</th>
+                                <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Progress %</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(setReportData.members || []).map((member, index) => {
+                                const statusTone =
+                                  member.status === 'Graduated' ? 'bg-emerald-100 text-emerald-700'
+                                  : member.status === 'Alumni' ? 'bg-indigo-100 text-indigo-700'
+                                  : member.status === 'Graduating' ? 'bg-amber-100 text-amber-700'
+                                  : member.status === 'Active' ? 'bg-sky-100 text-sky-700'
+                                  : 'bg-slate-100 text-slate-600'
+                                return (
+                                  <tr key={member.id} className="even:bg-slate-50">
+                                    <td className="px-3 py-2 border-b border-slate-100 text-slate-700">{index + 1}</td>
+                                    <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{member.matric_no || '—'}</td>
+                                    <td className="px-3 py-2 border-b border-slate-100 text-slate-900 font-medium">{member.full_name}</td>
+                                    <td className="px-3 py-2 border-b border-slate-100 text-slate-700">{member.cohort_name || '—'}</td>
+                                    <td className="px-3 py-2 border-b border-slate-100">
+                                      <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${statusTone}`}>{member.status || '—'}</span>
+                                    </td>
+                                    <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{member.passed || 0} of {member.total || setReportDataStats.courses}</td>
+                                    <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{member.completion_pct ?? 0}%</td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+
+                      {/* Section 2 — Courses Taken */}
+                      <section>
+                        <h4 className="font-display font-bold text-lg mb-3">Courses Taken</h4>
+                        {(setReportData.courses || []).length === 0 ? (
+                          <div className="text-center py-8 text-sm text-slate-500 rounded-xl border border-dashed border-slate-200">
+                            No courses have been added to this set yet.
+                          </div>
+                        ) : (setReportData.members || []).map((member) => (
+                          <div key={member.id} className="mb-6">
+                            <div className="flex items-baseline justify-between gap-3 mb-2 pb-1.5 border-b border-slate-200">
+                              <span className="font-semibold text-slate-900">{member.full_name}</span>
+                              <span className="text-xs text-slate-500">
+                                {member.matric_no || '—'}
+                                {member.cohort_name ? ` · ${member.cohort_name}` : ''}
+                              </span>
+                            </div>
+                            <div className="overflow-x-auto rounded-xl border border-slate-200">
+                              <table className="w-full text-sm border-collapse">
+                                <thead>
+                                  <tr className="bg-slate-50">
+                                    <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Course Code</th>
+                                    <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Course Title</th>
+                                    <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Result</th>
+                                    <th className="text-left text-xs uppercase tracking-wide text-slate-500 font-semibold px-3 py-2 border-b border-slate-200 whitespace-nowrap">Score</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {(setReportData.courses || []).map((course) => {
+                                    const info = member.results?.[course.id]
+                                    const resultStatus = info?.result_status || ''
+                                    let resultLabel = '—'
+                                    let resultTone = 'bg-slate-100 text-slate-600'
+                                    if (resultStatus === 'Pass') {
+                                      resultLabel = 'Pass'
+                                      resultTone = 'bg-emerald-100 text-emerald-700'
+                                    } else if (resultStatus === 'Fail') {
+                                      resultLabel = 'Fail'
+                                      resultTone = 'bg-red-100 text-red-700'
+                                    } else if (resultStatus) {
+                                      resultLabel = resultStatus
+                                      resultTone = 'bg-amber-100 text-amber-700'
+                                    } else if (info?.enrollment_status === 'active') {
+                                      resultLabel = 'In Progress'
+                                      resultTone = 'bg-amber-100 text-amber-700'
+                                    }
+                                    const hasScore = info && info.score !== null && info.score !== undefined && info.score !== ''
+                                    return (
+                                      <tr key={course.id} className="even:bg-slate-50">
+                                        <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{course.course_code || '—'}</td>
+                                        <td className="px-3 py-2 border-b border-slate-100 text-slate-900">{course.title}</td>
+                                        <td className="px-3 py-2 border-b border-slate-100">
+                                          <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${resultTone}`}>{resultLabel}</span>
+                                        </td>
+                                        <td className="px-3 py-2 border-b border-slate-100 text-slate-700 whitespace-nowrap">{hasScore ? info.score : '—'}</td>
+                                      </tr>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        ))}
+                      </section>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {gradVetting ? (
+        <div
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setGradVetting(null)}
+        >
+          <div
+            className="bg-white rounded-[24px] shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden isolate"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="shrink-0 px-6 py-4 border-b border-slate-100 bg-white flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold text-slate-900">Graduation Vetting</h3>
+                <p className="text-sm text-slate-500 mt-0.5">
+                  Confirm that <strong>{gradVetting.student.full_name}</strong> ({gradVetting.student.matric_no}) passed every course before moving to{' '}
+                  <span className="font-semibold text-slate-700">{gradVetting.targetStatus}</span>.
+                </p>
+              </div>
+              <button type="button" onClick={() => setGradVetting(null)} className="rounded-lg p-1 hover:bg-slate-100">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+
+            <div className="flex items-center justify-between mt-4">
+              <p className="text-xs text-slate-500">{graduationMatrix.courses.length} course{graduationMatrix.courses.length !== 1 ? 's' : ''} to confirm</p>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = {}
+                  for (const course of graduationMatrix.courses) next[course.id] = true
+                  setGradVettingConfirm(next)
+                }}
+                className="text-xs font-medium btn btn-ghost btn-sm lift border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50"
+              >
+                Select all as Yes
+              </button>
+            </div>
+
+            <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 mt-3">
+              <div className="px-4 py-2 grid grid-cols-[1fr_auto_auto] gap-3 items-center text-xs font-semibold text-slate-500">
+                <span>Course</span>
+                <span>Status</span>
+                <span>Passed?</span>
+              </div>
+              {graduationMatrix.courses.map((course) => {
+                const info = gradVetting.student.courses?.[course.id]
+                const isPass = info?.result_status === 'Pass'
+                const isFail = info?.result_status === 'Fail'
+                return (
+                  <div key={course.id} className="px-4 py-3 grid grid-cols-[1fr_auto_auto] gap-3 items-center">
+                    <span className="text-sm text-slate-900">{course.title}</span>
+                    <span className="text-xs font-medium">
+                      {isPass ? (
+                        <span className="rounded-full bg-emerald-100 text-emerald-700 px-2.5 py-1">Pass</span>
+                      ) : isFail ? (
+                        <span className="rounded-full bg-red-100 text-red-700 px-2.5 py-1">Fail</span>
+                      ) : (
+                        <span className="rounded-full bg-slate-100 text-slate-600 px-2.5 py-1">No result</span>
+                      )}
+                    </span>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 rounded"
+                        checked={Boolean(gradVettingConfirm[course.id])}
+                        onChange={(e) => setGradVettingConfirm((prev) => ({ ...prev, [course.id]: e.target.checked }))}
+                      />
+                      <span className="text-xs font-medium text-slate-700">Yes</span>
+                    </label>
+                  </div>
+                )
+              })}
+            </div>
+
+            {!vettingAllConfirmed ? (
+              <p className="text-xs text-amber-600 mt-3">
+                Confirm each course below by ticking the “Passed?” box. All courses must be confirmed.
+              </p>
+            ) : null}
+
+            <label className="text-sm text-slate-600 block">
+              Reason
+              <input
+                className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="e.g. Completed all courses for 2026 plan"
+                value={gradVettingReason}
+                onChange={(e) => setGradVettingReason(e.target.value)}
+              />
+            </label>
+            </div>
+            <div className="shrink-0 px-6 py-4 border-t border-slate-100 bg-white flex gap-2 justify-end">
+              <button
+                type="button"
+                className="px-4 py-2 text-sm rounded-lg bg-slate-100 hover:bg-slate-200"
+                onClick={() => setGradVetting(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!vettingAllConfirmed || gradVettingSaving}
+                onClick={confirmGradVetting}
+                className="px-4 py-2 text-sm btn btn-primary disabled:opacity-40"
+              >
+                {gradVettingSaving ? 'Saving…' : `Move to ${gradVetting.targetStatus}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {section === 'attendance' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden isolate rounded-[24px]">
+            <div className="shrink-0 flex items-center justify-between gap-3 px-5 py-4 border-b border-slate-100 bg-white rounded-t-[24px]">
+              <h3 className="font-semibold text-slate-900">Attendance Summary by Student</h3>
+              <div className="flex items-center gap-3">
+                <label className="text-sm text-slate-600 flex items-center gap-2">
+                  Class
+                  <select className="border rounded-lg px-2.5 py-1.5 text-sm bg-white" value={selectedClassNumber} onChange={(event) => setSelectedClassNumber(event.target.value)}>
+                    {classOptions.map((classNo) => (
+                      <option key={classNo} value={classNo}>{`Class ${classNo}`}</option>
+                    ))}
+                  </select>
+                </label>
+                <span className="text-xs text-slate-400 bg-slate-100 rounded-full px-2.5 py-0.5 font-medium">{attendanceSummary.length} students</span>
+              </div>
+            </div>
+            <div className="flex-1 min-h-0 overflow-auto">
+              <table className="data-table w-full text-sm">
+                <thead className="text-left text-slate-500 sticky top-0 bg-[#F8FAFC] z-10">
+                  <tr>
+                    <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Name</th>
+                    <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Present</th>
+                    <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Absent</th>
+                    <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Rate</th>
+                    <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Eligible</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {attendanceSummary.map((student) => (
+                    <tr key={student.student_id} className="border-t border-slate-100 hover:bg-[#EEF2FF] [&>td]:hover:bg-transparent hover:shadow-[inset_3px_0_0_#6366f1] transition-colors">
+                      <td className="px-4 py-3">{student.full_name}</td>
+                      <td className="px-4 py-3">{student.present_count}</td>
+                      <td className="px-4 py-3">{student.absent_count}</td>
+                      <td className="px-4 py-3">{student.attendance_rate}%</td>
+                      <td className={`px-4 py-3 ${student.eligible ? 'text-emerald-600' : 'text-amber-600'}`}>{student.eligible ? 'Eligible' : 'Not Eligible'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {section === 'results' ? (() => {
+        const ensurePlans = async () => {
+          if (plans.length) return
+          try {
+            const res = await apiClient.get('/course-plans')
+            setPlans(res.data)
+          } catch { /* ignore */ }
+        }
+
+        const loadResultsHistory = async () => {
+          setResultsHistoryLoading(true)
+          try {
+            const res = await apiClient.get('/results/history')
+            setResultsHistory(res.data)
+          } catch { /* ignore */ }
+          finally { setResultsHistoryLoading(false) }
+        }
+
+        const loadPlanCourses = async (planId) => {
+          if (!planId) { setPlanCourses([]); return }
+          try {
+            const res = await apiClient.get(`/course-plans/${planId}`)
+            setPlanCourses(res.data.items || [])
+          } catch { setPlanCourses([]) }
+        }
+
+        const loadPlanGrid = async () => {
+          if (!resultPlanId || !resultCourseId) return
+          setPlanGridLoading(true)
+          setPlanGrid(null)
+          setPlanGridEdits({})
+          try {
+            const res = await apiClient.get(`/results/plan-course-grid?planId=${resultPlanId}&courseId=${resultCourseId}&includeAllStudents=${includeAllStudents}`)
+            setPlanGrid(res.data)
+          } catch (err) { notify(err.response?.data?.message || 'Failed to load grid') }
+          finally { setPlanGridLoading(false) }
+        }
+
+        const saveAllEdits = async () => {
+          const entries = Object.entries(planGridEdits)
+            .map(([key, edit]) => {
+              const [studentId] = key.split('_')
+              return {
+                studentId: Number(studentId),
+                courseId: Number(resultCourseId),
+                resultType: planGridResultType,
+                score: edit.score !== '' && edit.score !== undefined ? Number(edit.score) : undefined,
+                status: edit.status,
+              }
+            })
+            .filter((e) => e.status)
+          if (!entries.length) { notify('No changes to save'); return }
+          try {
+            await apiClient.post('/results/bulk-plan', { entries })
+            setPlanGridEdits({})
+            await loadPlanGrid()
+            await loadGraduationMatrix()
+            notify('Results saved')
+          } catch (err) { notify(err.response?.data?.message || 'Save failed') }
+        }
+
+        const saveRowEdit = async (student) => {
+          const editKey = `${student.student_id}_${planGrid.course.id}`
+          const edit = planGridEdits[editKey]
+          if (!edit) { notify('No changes to save for this row'); return }
+          try {
+            await apiClient.post('/results/bulk-plan', {
+              entries: [
+                {
+                  studentId: Number(student.student_id),
+                  courseId: Number(resultCourseId),
+                  resultType: planGridResultType,
+                  score: edit.score !== '' && edit.score !== undefined ? Number(edit.score) : undefined,
+                  status: edit.status,
+                },
+              ],
+            })
+            setPlanGridEdits((prev) => {
+              const next = { ...prev }
+              delete next[editKey]
+              return next
+            })
+            await loadPlanGrid()
+            await loadGraduationMatrix()
+            notify('Result saved')
+          } catch (err) {
+            notify(err.response?.data?.message || 'Save failed')
+          }
+        }
+
+        return (
+          <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+            {/* Tab bar — shrink-0 */}
+            <div className="shrink-0 flex gap-1 bg-slate-100 rounded-xl p-1 w-fit">
+              {[{ key: 'input', label: 'Enter Results' }, { key: 'history', label: 'History' }].map(({ key, label }) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => { setResultsTab(key); if (key === 'history') loadResultsHistory(); else ensurePlans() }}
+                  className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${resultsTab === key ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Shared selectors — shrink-0 */}
+            <div className="shrink-0 card card-pad card-hover">
+              <div className="flex flex-wrap gap-4 items-end">
+                <label className="text-sm text-slate-600 block flex-1 min-w-[200px]">
+                  Plan
+                  <select
+                    className="mt-1 w-full border rounded-lg px-3 py-2"
+                    value={resultPlanId}
+                    onClick={ensurePlans}
+                    onChange={(e) => { setResultPlanId(e.target.value); setResultCourseId(''); setPlanCourses([]); setPlanGrid(null); setPlanGridEdits({}); loadPlanCourses(e.target.value) }}
+                  >
+                    <option value="">Select plan</option>
+                    {plans.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name} ({p.year})</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-sm text-slate-600 block flex-1 min-w-[200px]">
+                  Course
+                  <select
+                    className="mt-1 w-full border rounded-lg px-3 py-2"
+                    value={resultCourseId}
+                    onChange={(e) => { setResultCourseId(e.target.value); setPlanGrid(null); setPlanGridEdits({}) }}
+                  >
+                    <option value="">Select course</option>
+                    {planCourses.map((c) => (
+                      <option key={c.course_id} value={c.course_id}>{c.course_code ? `${c.course_code} — ` : ''}{c.course_title}</option>
+                    ))}
+                  </select>
+                </label>
+                {resultsTab === 'input' ? (
+                  <label className="text-sm text-slate-600 block">
+                    Result Type
+                    <select
+                      className="mt-1 w-full border rounded-lg px-3 py-2"
+                      value={planGridResultType}
+                      onChange={(e) => setPlanGridResultType(e.target.value)}
+                    >
+                      <option value="Final">Final</option>
+                      <option value="Assignment">Assignment</option>
+                      <option value="Exam">Exam</option>
+                    </select>
+                  </label>
+                ) : null}
+                {resultsTab === 'input' ? (
+                  <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer pb-1">
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 rounded"
+                      checked={includeAllStudents}
+                      onChange={(e) => setIncludeAllStudents(e.target.checked)}
+                    />
+                    Include unenrolled students
+                  </label>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={loadPlanGrid}
+                  disabled={!resultPlanId || !resultCourseId || planGridLoading}
+                  className="btn btn-primary px-4 py-2 text-sm disabled:opacity-50"
+                >
+                  {planGridLoading ? 'Loading...' : 'Load Grid'}
+                </button>
+              </div>
+            </div>
+
+            {/* Input grid tab — card card-hover flex flex-col flex-1 min-h-0 overflow-hidden with inner overflow-auto (graduation matrix yardstick) */}
+            {resultsTab === 'input' ? (
+              planGrid ? (
+                <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden">
+                  <div className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-slate-100 gap-3 flex-wrap">
+                    <div>
+                      <h3 className="font-semibold text-slate-900">{planGrid.plan.name} — {planGrid.course.title}</h3>
+                      <p className="text-xs text-slate-400 mt-0.5">{planGrid.students.length} students · {planGridResultType}</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={Object.keys(planGridEdits).length === 0}
+                      onClick={saveAllEdits}
+                      className="btn btn-primary px-4 py-2 text-sm disabled:opacity-50"
+                    >
+                      Save Changes {Object.keys(planGridEdits).length > 0 ? `(${Object.keys(planGridEdits).length})` : ''}
+                    </button>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-auto">
+                  {planGrid.students.length === 0 ? (
+                    <p className="text-sm text-slate-400 p-4">No students found for this course. Toggle "Include unenrolled students" and reload.</p>
+                  ) : (
+                    <table className="data-table w-full text-sm border-collapse">
+                      <thead className="sticky top-0 bg-white">
+                        <tr className="border-b border-slate-200">
+                          <th className="py-2 pr-4 text-left text-slate-500 font-medium min-w-[160px]">Student</th>
+                          <th className="py-2 pr-3 text-left text-slate-500 font-medium">Matric</th>
+                          <th className="py-2 pr-3 text-left text-slate-500 font-medium text-xs w-20">Status</th>
+                          <th className="py-2 px-3 text-left text-slate-500 font-medium text-xs">Score</th>
+                          <th className="py-2 px-3 text-left text-slate-500 font-medium text-xs">Result</th>
+                          <th className="py-2 px-3 text-left text-slate-500 font-medium text-xs">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {planGrid.students.map((student) => {
+                          const editKey = `${student.student_id}_${planGrid.course.id}`
+                          const edit = planGridEdits[editKey]
+                          const existing = student.results?.[planGridResultType]
+                          const displayScore = edit?.score !== undefined ? edit.score : (existing?.score != null ? String(existing.score) : '')
+                          const displayStatus = edit?.status !== undefined ? edit.status : (existing?.status || 'Pass')
+                          const isEdited = !!edit
+                          return (
+                            <tr key={student.student_id} className={`border-b border-slate-100 hover:bg-slate-50 ${!student.is_enrolled ? 'bg-amber-50/50' : ''}`}>
+                              <td className="py-2.5 pr-4 font-medium text-slate-800">
+                                <span className="flex items-center gap-2">
+                                {student.full_name}
+                                {!student.is_enrolled ? (
+                                  <span className="text-[10px] bg-amber-100 text-amber-700 rounded-full px-1.5 py-0.5 font-medium">not enrolled</span>
+                                ) : null}
+                                </span>
+                              </td>
+                              <td className="py-2.5 pr-3 text-slate-500 text-xs">{student.matric_no || '—'}</td>
+                              <td className="py-2.5 pr-3 text-xs">
+                                {student.is_enrolled ? (
+                                  <span className="text-emerald-600">Enrolled</span>
+                                ) : (
+                                  <span className="text-amber-600">Not enrolled</span>
+                                )}
+                              </td>
+                              <td className="py-2 px-3">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="100"
+                                  placeholder="Score"
+                                  className={`w-20 border rounded px-2 py-1 text-xs ${isEdited ? 'border-gold-400 bg-indigo-50' : 'border-slate-200'}`}
+                                  value={displayScore}
+                                  onChange={(e) => {
+                                    const val = e.target.value
+                                    const autoStatus = val !== '' ? (Number(val) >= 50 ? 'Pass' : 'Fail') : (edit?.status || existing?.status || 'Pass')
+                                    setPlanGridEdits((prev) => ({
+                                      ...prev,
+                                      [editKey]: { ...(prev[editKey] || {}), score: val, status: autoStatus },
+                                    }))
+                                  }}
+                                />
+                              </td>
+                              <td className="py-2 px-3">
+                                <select
+                                  className={`border rounded px-1 py-0.5 text-xs ${isEdited ? 'border-gold-400 bg-indigo-50' : 'border-slate-200'}`}
+                                  value={displayStatus}
+                                  onChange={(e) => setPlanGridEdits((prev) => ({
+                                    ...prev,
+                                    [editKey]: { ...(prev[editKey] || { score: displayScore }), status: e.target.value },
+                                  }))}
+                                >
+                                  <option value="Pass">Pass</option>
+                                  <option value="Fail">Fail</option>
+                                </select>
+                              </td>
+                              <td className="py-2 px-3">
+                                <button
+                                  type="button"
+                                  onClick={() => saveRowEdit(student)}
+                                  disabled={!isEdited}
+                                  className="btn btn-primary btn-sm lift disabled:opacity-40"
+                                >
+                                  Save
+                                </button>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                  </div>
+                </div>
+              ) : (
+                <div className="shrink-0 card card-pad card-hover">
+                  <p className="text-sm text-slate-400 text-center py-6">
+                    Select a plan and course, then click "Load Grid" to enter results.
+                  </p>
+                </div>
+              )
+            ) : null}
+
+            {/* History tab — auto-loads all results — graduation matrix yardstick: card card-hover flex flex-col flex-1 min-h-0 overflow-hidden with inner overflow-auto */}
+            {resultsTab === 'history' ? (
+              <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden">
+                <div className="shrink-0 flex items-center justify-between gap-3 flex-wrap px-4 py-3 border-b border-slate-100">
+                    <h3 className="font-semibold text-slate-900">All Saved Results</h3>
+                    <input
+                      className="border rounded-lg px-3 py-2 text-sm w-64"
+                      placeholder="Search by student or course..."
+                      value={historySearch}
+                      onChange={(e) => setHistorySearch(e.target.value)}
+                    />
+                  </div>
+                  <p className="shrink-0 text-xs text-slate-400 px-4 py-2">
+                    {resultsHistoryLoading ? 'Loading...' : `${resultsHistory.reduce((sum, c) => sum + c.courses.reduce((s, co) => s + co.students.length, 0), 0)} results across ${resultsHistory.length} cohorts`}
+                  </p>
+                  <div className="flex-1 min-h-0 overflow-auto px-4 pb-4">
+
+                  {resultsHistoryLoading ? (
+                    <p className="text-sm text-slate-400 py-6 text-center">Loading results...</p>
+                  ) : resultsHistory.length === 0 ? (
+                    <p className="text-sm text-slate-400 py-6 text-center">No results saved yet.</p>
+                  ) : (
+                    <div className="space-y-6">
+                      {resultsHistory.map((cohort) => {
+                        const filteredCourses = cohort.courses
+                          .map((course) => ({
+                            ...course,
+                            filteredStudents: course.students.filter((s) =>
+                              !historySearch ||
+                              s.full_name.toLowerCase().includes(historySearch.toLowerCase()) ||
+                              course.course_title.toLowerCase().includes(historySearch.toLowerCase())
+                            ),
+                          }))
+                          .filter((c) => c.filteredStudents.length > 0)
+
+                        if (!filteredCourses.length) return null
+
+                        return (
+                          <div key={cohort.cohort_id}>
+                            <h4 className="font-semibold text-slate-800 mb-2 flex items-center gap-2">
+                              <span className="rounded-full bg-sky-100 text-indigo-700 px-3 py-0.5 text-xs">{cohort.cohort_name}</span>
+                            </h4>
+                            <div className="space-y-3">
+                              {filteredCourses.map((course) => (
+                                <div key={course.course_id} className="border border-slate-200 rounded-xl overflow-hidden">
+                                  <div className="bg-slate-50 px-4 py-2 border-b border-slate-200 flex items-center justify-between">
+                                    <span className="text-sm font-medium text-slate-800">{course.course_title}{course.course_code ? ` (${course.course_code})` : ''}</span>
+                                    <span className="text-xs text-slate-400">{course.filteredStudents.length} students</span>
+                                  </div>
+                                  <div className="overflow-x-auto">
+                                    <table className="data-table w-full text-sm">
+                                      <thead>
+                                        <tr className="border-b border-slate-100">
+                                          <th className="py-2 px-4 text-left text-slate-500 font-medium">Student</th>
+                                          <th className="py-2 px-3 text-left text-slate-500 font-medium">Matric</th>
+                                          <th className="py-2 px-3 text-left text-slate-500 font-medium">Result Type</th>
+                                          <th className="py-2 px-3 text-left text-slate-500 font-medium">Score</th>
+                                          <th className="py-2 px-3 text-left text-slate-500 font-medium">Status</th>
+                                          <th className="py-2 px-3 text-left text-slate-500 font-medium">Date</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {course.filteredStudents.map((s) => (
+                                          <tr key={s.result_id || `${s.student_id}-${course.course_id}`} className="border-b border-slate-100 hover:bg-slate-50">
+                                            <td className="py-2 px-4 font-medium text-slate-800">{s.full_name}</td>
+                                            <td className="py-2 px-3 text-slate-500">{s.matric_no || '—'}</td>
+                                            <td className="py-2 px-3 text-slate-500 text-xs">{s.result_type || '—'}</td>
+                                            <td className="py-2 px-3">{s.score != null ? s.score : '—'}</td>
+                                            <td className="py-2 px-3">
+                                              {s.result_status ? (
+                                                <span className={`text-xs rounded-full px-2 py-0.5 font-medium ${s.result_status === 'Pass' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                                                  {s.result_status}
+                                                </span>
+                                              ) : (
+                                                <span className="text-slate-300">—</span>
+                                              )}
+                                            </td>
+                                            <td className="py-2 px-3 text-xs text-slate-400 whitespace-nowrap">{s.uploaded_at ? fmtDate(s.uploaded_at) : '—'}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )
+      })() : null}
+
+      {section === 'graduation' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          {/* Header row — Graduation Matrix + filters + Create Calendar (opens same formBuilderOpen slider) */}
+          <div className="shrink-0 flex flex-wrap items-center justify-between gap-3">
+            <h3 className="font-display font-bold tracking-tight text-slate-900">{graduationView === 'sets' ? 'Graduating Sets' : 'Graduation Matrix'}</h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex gap-1 bg-slate-100 rounded-xl p-1">
+                {[{ key: 'matrix', label: 'Matrix' }, { key: 'sets', label: 'Sets' }].map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setGraduationView(tab.key)}
+                    className={`rounded-full px-3 py-1 text-xs border cursor-pointer ${graduationView === tab.key ? 'btn btn-primary border-slate-900' : 'bg-white text-slate-600 border-slate-300'}`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              {graduationView === 'matrix' ? (
+              <>
+              {['all', 'Active', 'Graduating', 'Graduated', 'Alumni'].map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setGraduationStatusFilter(value)}
+                  className={`rounded-full px-3 py-1 text-xs border cursor-pointer ${graduationStatusFilter === value ? 'btn btn-primary border-slate-900' : 'bg-white text-slate-600 border-slate-300'}`}
+                >
+                  {value === 'all' ? 'All Statuses' : value}
+                </button>
+              ))}
+              <select
+                className="rounded-full px-3 py-1 text-xs border bg-white text-slate-600"
+                value={graduationCohortFilter}
+                onChange={(event) => setGraduationCohortFilter(event.target.value)}
+              >
+                <option value="">All Batches</option>
+                {cohorts.map((cohort) => (
+                  <option key={cohort.id} value={String(cohort.id)}>
+                    {cohort.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setShowGradReport(true)}
+                className="btn btn-ghost btn-sm lift inline-flex items-center gap-1.5"
+              >
+                <FileText size={14} /> Report
+              </button>
+              <button
+                type="button"
+                onClick={openGraduationCalendarTemplate}
+                className="btn btn-primary btn-sm lift inline-flex items-center gap-1.5"
+              >
+                <Plus size={14} /> Create Calendar
+              </button>
+              </>
+              ) : (
+              <button
+                type="button"
+                onClick={openSetEditorCreate}
+                className="btn btn-primary btn-sm lift inline-flex items-center gap-1.5"
+              >
+                <Plus size={14} /> New Set
+              </button>
+              )}
+            </div>
+          </div>
+
+          {graduationView === 'matrix' ? (
+          <>
+          {/* Stats — pushed up, shrink-0, bento/grid at top */}
+          <div className="shrink-0 grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <Card title="Total Students" value={graduationStatusCounts.total} className="card card-hover stat" />
+            <Card title="Graduating" value={graduationStatusCounts.Graduating} className="card card-hover stat" />
+            <Card title="Graduated" value={graduationStatusCounts.Graduated} className="card card-hover stat" />
+            <Card title="Alumni" value={graduationStatusCounts.Alumni} className="card card-hover stat" />
+          </div>
+
+          {/* Yardstick table container — fills page, scrolls inside */}
+          <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-auto">
+              <DataTable
+              data={filteredGraduationStudents}
+              loading={allStudentsLoading || graduationMatrixLoading}
+              rowKey="id"
+              initialPageSize={25}
+              fillHeight
+              className="flex-1 min-h-0 border-0 shadow-none rounded-none"
+              emptyMessage="No students match the current filters."
+              emptyIcon={<GraduationCap size={32} />}
+              globalSearchPlaceholder="Search name, matric, status…"
+              defaultSort={{ id: 'completion_pct', dir: 'desc' }}
+              columns={[
+                {
+                  id: 'full_name',
+                  header: 'Student',
+                  accessor: 'full_name',
+                  cell: (student) => (
+                    <Link to={`/lecturer/students/${student.id}`} className="font-medium text-slate-900 hover:underline">
+                      {student.full_name}
+                    </Link>
+                  ),
+                },
+                { id: 'matric_no', header: 'Matric', accessor: 'matric_no' },
+                {
+                  id: 'status',
+                  header: 'Status',
+                  accessor: 'status',
+                  filterType: 'select',
+                  filterOptions: ['Active', 'Graduating', 'Graduated', 'Alumni'],
+                  cell: (s) => {
+                    const toneMap = { Active: 'emerald', Graduating: 'gold', Graduated: 'sky', Alumni: 'slate' }
+                    return <Badge tone={toneMap[s.status] || 'slate'} dot>{s.status}</Badge>
+                  },
+                },
+                {
+                  id: 'completion_pct',
+                  header: 'Progress',
+                  accessor: 'completion_pct',
+                  sortType: 'number',
+                  cell: (s) => (
+                    <div className="flex items-center gap-2 min-w-[100px]">
+                      <div className="flex-1 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                        <div className="h-full rounded-full bg-indigo-600" style={{ width: `${Math.min(Number(s.completion_pct) || 0, 100)}%` }} />
+                      </div>
+                      <span className="text-xs font-semibold text-slate-700 tabular-nums w-9 text-right">{s.completion_pct}%</span>
+                    </div>
+                  ),
+                },
+                { id: 'passed', header: 'Passed', accessor: 'passed', sortType: 'number', align: 'center' },
+                { id: 'remaining', header: 'Remaining', accessor: 'remaining', sortType: 'number', align: 'center' },
+                ...(graduationMatrix.courses || []).map((course) => ({
+                  id: `course_${course.id}`,
+                  header: course.course_code || course.title,
+                  accessor: (student) => {
+                    const info = student.courses?.[course.id]
+                    if (info?.result_status === 'Pass') return 'Pass'
+                    if (info?.result_status === 'Fail') return 'Fail'
+                    if (info?.enrollment_status === 'active') return 'Active'
+                    return ''
+                  },
+                  filterType: 'select',
+                  filterOptions: ['Pass', 'Fail', 'Active'],
+                  align: 'center',
+                  sortable: true,
+                  cell: (student) => {
+                    const info = student.courses?.[course.id]
+                    const isCurrent = info?.enrollment_status === 'active'
+                    const content = info?.result_status === 'Pass'
+                      ? <span className="text-emerald-600 font-semibold">✓</span>
+                      : info?.result_status === 'Fail'
+                      ? <span className="text-red-500 font-semibold">✗</span>
+                      : info?.enrollment_status === 'active'
+                      ? <span className="text-sky-600 font-medium text-xs">In progress</span>
+                      : null
+                    return (
+                      <span className={`inline-flex min-w-[2rem] justify-center rounded-md px-1 ${isCurrent ? 'bg-amber-50' : ''}`}>
+                        {content}
+                      </span>
+                    )
+                  },
+                })),
+                {
+                  id: 'actions',
+                  header: 'Action',
+                  filterable: false,
+                  sortable: false,
+                  align: 'right',
+                  cell: (student) => (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        className="rounded-lg p-2 bg-slate-100 text-slate-700 hover:bg-slate-200 cursor-pointer"
+                        onClick={() => setOpenGraduationActionFor((prev) => (prev === student.id ? null : student.id))}
+                      >
+                        <MoreVertical size={16} />
+                      </button>
+                      {openGraduationActionFor === student.id ? (
+                        <div className="absolute right-0 mt-2 z-30 w-44 rounded-xl border border-slate-200 bg-white shadow-lg p-1">
+                          <button type="button" className="w-full text-left rounded-lg px-3 py-2 text-sm hover:bg-slate-50 cursor-pointer" onClick={() => openGradVetting(student, 'Graduating')}>
+                            Mark as Graduating
+                          </button>
+                          <button
+                            type="button"
+                            className="w-full text-left rounded-lg px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+                            disabled={student.remaining > 0 || student.failed > 0}
+                            onClick={() => openGradVetting(student, 'Graduated')}
+                          >
+                            Mark as Graduated
+                          </button>
+                          <button
+                            type="button"
+                            className="w-full text-left rounded-lg px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+                            disabled={student.status !== 'Graduated'}
+                            onClick={() => { updateStudentLifecycle(student, 'Alumni'); setOpenGraduationActionFor(null) }}
+                          >
+                            Mark as Alumni
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ),
+                },
+              ]}
+            />
+              </div>
+            </div>
+          </>
+          ) : (
+          <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden isolate">
+            <div className="shrink-0 px-5 py-4 border-b border-slate-100 bg-white flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <h3 className="font-display font-bold tracking-tight text-slate-900 text-base">Graduating Sets</h3>
+                <span className="text-xs bg-slate-100 text-slate-600 rounded-full px-2.5 py-1 font-medium">{graduationSets.length}</span>
+              </div>
+            </div>
+            <div className="flex-1 min-h-0 overflow-auto">
+              {graduationSets.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center px-6 py-14">
+                  <GraduationCap size={36} className="text-slate-300" />
+                  <p className="mt-3 text-sm text-slate-500 max-w-sm">
+                    No graduating sets yet. Create one to group graduating students and their courses.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={openSetEditorCreate}
+                    className="mt-4 btn btn-primary btn-sm lift inline-flex items-center gap-1.5"
+                  >
+                    <Plus size={14} /> New Set
+                  </button>
+                </div>
+              ) : (
+                <table className="data-table w-full text-sm">
+                  <thead className="text-left text-slate-500 sticky top-0 bg-[#F8FAFC]">
+                    <tr>
+                      <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Name</th>
+                      <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Graduation Date</th>
+                      <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Members</th>
+                      <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Courses</th>
+                      <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Status</th>
+                      <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B] text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {graduationSets.map((row) => (
+                      <tr key={row.id} className="border-t border-slate-100 hover:bg-[#EEF2FF] [&>td]:hover:bg-transparent hover:shadow-[inset_3px_0_0_#6366f1] transition-colors">
+                        <td className="px-4 py-3">
+                          <p className="font-medium text-slate-900">{row.name}</p>
+                          {row.description ? <p className="text-xs text-slate-500 truncate max-w-[320px]">{row.description}</p> : null}
+                        </td>
+                        <td className="px-4 py-3 text-slate-700 whitespace-nowrap">{row.graduation_date ? fmtDate(row.graduation_date) : '—'}</td>
+                        <td className="px-4 py-3 text-slate-700 tabular-nums">{row.member_count ?? 0}</td>
+                        <td className="px-4 py-3 text-slate-700 tabular-nums">{row.course_count ?? 0}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                            row.status === 'active' ? 'bg-indigo-100 text-indigo-700'
+                            : row.status === 'completed' ? 'bg-slate-100 text-slate-700'
+                            : row.status === 'archived' ? 'bg-amber-100 text-amber-700'
+                            : 'bg-slate-100 text-slate-600'
+                          }`}>
+                            {row.status ? row.status.charAt(0).toUpperCase() + row.status.slice(1) : '—'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              type="button"
+                              title="Report"
+                              onClick={() => openSetReport(row)}
+                              className="btn btn-ghost btn-sm lift rounded-lg p-2"
+                            >
+                              <FileText size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              title="Edit"
+                              onClick={() => openSetEditorEdit(row)}
+                              className="btn btn-ghost btn-sm lift rounded-lg p-2"
+                            >
+                              <SquarePen size={15} />
+                            </button>
+                            {row.status === 'active' ? (
+                              <button
+                                type="button"
+                                title="Complete set"
+                                onClick={() => completeSet(row)}
+                                className="btn btn-ghost btn-sm lift rounded-lg p-2"
+                              >
+                                <GraduationCap size={15} />
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              title="Delete"
+                              onClick={() => deleteSet(row)}
+                              className="btn btn-ghost btn-sm lift rounded-lg p-2 hover:text-red-600"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+          )}
+        </div>
+      ) : null}
+
+      {section === 'assignments' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          <div className="shrink-0 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex gap-1 bg-slate-100 rounded-xl p-1">
+              {['assignments', 'exams'].map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setExamsTab(tab)}
+                  className={`rounded-lg px-5 py-1.5 text-sm font-medium capitalize transition-colors ${examsTab === tab ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  {tab === 'assignments' ? 'Assignments' : 'Exams'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {examsTab === 'assignments' ? (
+            <div className="flex-1 min-h-0 grid xl:grid-cols-[390px_1fr] gap-4 overflow-hidden">
+              <form onSubmit={createAssignment} className="card card-hover flex flex-col overflow-hidden max-h-[65vh]">
+                <div className="shrink-0 px-5 py-4 border-b border-slate-100 bg-white">
+                  <h3 className="font-semibold text-slate-900">Create Assignment</h3>
+                  <p className="text-sm text-slate-500 mt-1">Assignments are sent only to students who are eligible from attendance.</p>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                  <input className="w-full border rounded-lg px-3 py-2" placeholder="Title" value={assignmentForm.title} onChange={(event) => setAssignmentForm((prev) => ({ ...prev, title: event.target.value }))} required />
+                  <textarea className="w-full min-h-36 border rounded-lg px-3 py-2" placeholder="Description" value={assignmentForm.description} onChange={(event) => setAssignmentForm((prev) => ({ ...prev, description: event.target.value }))} required />
+                  <input className="w-full border rounded-lg px-3 py-2" type="date" value={assignmentForm.dueDate} onChange={(event) => setAssignmentForm((prev) => ({ ...prev, dueDate: event.target.value }))} />
+                  <input className="w-full border rounded-lg px-3 py-2" type="file" onChange={(event) => setAssignmentForm((prev) => ({ ...prev, file: event.target.files?.[0] || null }))} />
+                </div>
+                <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+                  <button className="w-full btn btn-primary px-4 py-2 lift">Send Assignment</button>
+                </div>
+              </form>
+
+              <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden isolate rounded-[24px]">
+                <div className="shrink-0 px-5 py-4 border-b border-slate-100 bg-white rounded-t-[24px] flex items-center justify-between">
+                  <h3 className="font-semibold text-slate-900">Eligible Students ({eligibleStudents.length})</h3>
+                </div>
+                <div className="flex-1 min-h-0 overflow-auto">
+                  <table className="data-table w-full text-sm">
+                    <thead className="text-left text-slate-500 sticky top-0 bg-[#F8FAFC]">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Name</th>
+                        <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Matric</th>
+                        <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Email</th>
+                        <th className="px-4 py-3 font-semibold text-[0.68rem] uppercase tracking-[0.08em] text-[#64748B]">Attendance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {eligibleStudents.map((student) => (
+                        <tr key={student.id} className="border-t border-slate-100 hover:bg-[#EEF2FF] [&>td]:hover:bg-transparent hover:shadow-[inset_3px_0_0_#6366f1] transition-colors">
+                          <td className="px-4 py-3">{student.full_name}</td>
+                          <td className="px-4 py-3">{student.matric_no}</td>
+                          <td className="px-4 py-3">{student.email}</td>
+                          <td className="px-4 py-3">{student.attendance_count}/{student.min_attendance_required}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+              <div className="shrink-0 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-semibold text-slate-900">Create Exam</h3>
+                  <p className="text-sm text-slate-500">Build questions on the left — live preview on the right. Save when ready, then send to students.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setExamSavedListOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 shadow-sm"
+                >
+                  <FileText size={16} />
+                  Saved Exams ({exams.length})
+                </button>
+              </div>
+
+              <div className="flex-1 min-h-0 grid xl:grid-cols-[1.15fr_0.85fr] gap-4 overflow-hidden">
+                <form onSubmit={createExam} className="card card-hover flex flex-col overflow-hidden">
+                  <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                    <div>
+                      <p className="text-sm font-medium text-slate-700 mb-1.5">Course</p>
+                    <select
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                      value={selectedCourseId || ''}
+                      onChange={(e) => setSelectedCourseId(e.target.value)}
+                    >
+                      <option value="">Select course</option>
+                      {courses.map((course) => (
+                        <option key={course.id} value={course.id}>
+                          {course.is_current ? '★ ' : ''}{course.course_code ? `${course.course_code} — ` : ''}{course.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <div>
+                      <p className="text-sm font-medium text-slate-700 mb-1.5">Plan (academic year)</p>
+                      <select
+                        className="w-full border rounded-lg px-3 py-2 text-sm"
+                        value={examForm.planId}
+                        onChange={(event) => setExamForm((prev) => ({ ...prev, planId: event.target.value }))}
+                      >
+                        <option value="">None (general exam)</option>
+                        {plans.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} — {p.year}{p.is_active ? ' (active)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-slate-700 mb-1.5">Due date</p>
+                      <input className="w-full border rounded-lg px-3 py-2 text-sm" type="date" value={examForm.dueDate} onChange={(event) => setExamForm((prev) => ({ ...prev, dueDate: event.target.value }))} />
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-sm font-medium text-slate-700 mb-1.5">Exam Type</p>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {[
+                        { key: 'essay', label: 'Essay', hint: 'Questions emailed to students' },
+                        { key: 'mcq', label: 'MCQ', hint: 'In-system quiz + access ID' },
+                        { key: 'paper', label: 'Paper', hint: 'One formatted paper written in the LMS' },
+                      ].map((t) => (
+                        <button
+                          key={t.key}
+                          type="button"
+                          onClick={() => setExamForm((prev) => ({
+                            ...prev,
+                            examType: t.key,
+                            questions: t.key === 'mcq'
+                              ? (prev.examType === 'mcq' ? prev.questions : [blankMcqQuestion()])
+                              : (prev.examType !== 'mcq' ? prev.questions : [{ text: '' }]),
+                          }))}
+                          className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                            examForm.examType === t.key ? 'border-sky-500 bg-indigo-50' : 'border-slate-200 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span className="block text-sm font-semibold text-slate-900">{t.label}</span>
+                          <span className="block text-xs text-slate-500 mt-0.5">{t.hint}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <input className="w-full border rounded-lg px-3 py-2.5 text-sm" placeholder="Exam title (e.g. 2026 Plan — Final Exam)" value={examForm.title} onChange={(event) => setExamForm((prev) => ({ ...prev, title: event.target.value }))} required />
+                    {examForm.examType === 'mcq' && (
+                      <label className="text-sm text-slate-600">
+                        Timer (minutes — optional)
+                        <input
+                          type="number"
+                          min="1"
+                          max="600"
+                          className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+                          placeholder="e.g. 60 — blank = untimed"
+                          value={examForm.durationMinutes}
+                          onChange={(event) => setExamForm((prev) => ({ ...prev, durationMinutes: event.target.value }))}
+                        />
+                      </label>
+                    )}
+                    {examForm.examType === 'mcq' && (
+                      <label className="text-sm text-slate-600">
+                        Results release date (optional)
+                        <input
+                          type="datetime-local"
+                          className="mt-1 w-full border rounded-lg px-3 py-2 text-sm"
+                          value={examForm.resultsReleaseAt || ''}
+                          onChange={(event) => setExamForm((prev) => ({ ...prev, resultsReleaseAt: event.target.value }))}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <textarea className="w-full min-h-20 border rounded-lg px-3 py-2 text-sm" placeholder="Instructions / description" value={examForm.description} onChange={(event) => setExamForm((prev) => ({ ...prev, description: event.target.value }))} />
+
+                  {examForm.examType === 'paper' ? (
+                    <div className="rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                      Paper exams are not timed and have no preset questions — students write and format a single paper (headings, bold, lists, images) in the LMS and submit it here. You will score it and leave feedback in the Marking section.
+                    </div>
+                  ) : examForm.examType === 'mcq' ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-semibold text-slate-700">MCQ Questions</p>
+                        <button
+                          type="button"
+                          onClick={() => setExamForm((prev) => ({ ...prev, questions: [...prev.questions, blankMcqQuestion()] }))}
+                          className="inline-flex items-center gap-1 text-xs rounded-lg bg-slate-100 px-2.5 py-1.5 hover:bg-slate-200"
+                        >
+                          <Plus size={14} /> Add question
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-400">After save, a quiz URL is generated. Students unlock with Access ID; scores are stored and mailed when you release results.</p>
+                      {examForm.questions.map((q, idx) => (
+                        <div key={idx} className="border border-slate-200 rounded-xl p-4 space-y-2 bg-slate-50">
+                          <div className="flex items-start gap-2">
+                            <span className="text-xs font-bold text-slate-400 pt-2">Q{idx + 1}</span>
+                            <textarea
+                              className="w-full border rounded-lg px-3 py-2 text-sm bg-white"
+                              rows={3}
+                              placeholder="Question text"
+                              value={q.text}
+                              onChange={(event) => setExamForm((prev) => ({
+                                ...prev,
+                                questions: prev.questions.map((item, i) => (i === idx ? { ...item, text: event.target.value } : item)),
+                              }))}
+                            />
+                            {examForm.questions.length > 1 ? (
+                              <button
+                                type="button"
+                                onClick={() => setExamForm((prev) => ({
+                                  ...prev,
+                                  questions: prev.questions.filter((_, i) => i !== idx),
+                                }))}
+                                className="rounded-lg p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                              >
+                                <X size={16} />
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="space-y-1.5 pl-6">
+                            {(q.options || []).map((opt, optIdx) => (
+                              <div key={opt.key || optIdx} className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  title="Mark as correct answer"
+                                  onClick={() => setExamForm((prev) => ({
+                                    ...prev,
+                                    questions: prev.questions.map((item, i) => (i === idx ? { ...item, correctAnswer: opt.key } : item)),
+                                  }))}
+                                  className={`shrink-0 w-7 h-7 rounded-lg text-xs font-bold border ${
+                                    q.correctAnswer === opt.key
+                                      ? 'bg-emerald-600 text-white border-emerald-600'
+                                      : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-400'
+                                  }`}
+                                >
+                                  {opt.key}
+                                </button>
+                                <input
+                                  className="flex-1 border rounded-lg px-2 py-1.5 text-sm bg-white"
+                                  placeholder={`Option ${opt.key}`}
+                                  value={opt.label}
+                                  onChange={(event) => setExamForm((prev) => ({
+                                    ...prev,
+                                    questions: prev.questions.map((item, i) => {
+                                      if (i !== idx) return item
+                                      const options = (item.options || []).map((o, j) => (j === optIdx ? { ...o, label: event.target.value } : o))
+                                      return { ...item, options }
+                                    }),
+                                  }))}
+                                />
+                                {(q.options || []).length > 2 ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setExamForm((prev) => ({
+                                      ...prev,
+                                      questions: prev.questions.map((item, i) => {
+                                        if (i !== idx) return item
+                                        const options = (item.options || []).filter((_, j) => j !== optIdx)
+                                        const correctAnswer = options.some((o) => o.key === item.correctAnswer)
+                                          ? item.correctAnswer
+                                          : (options[0]?.key || 'A')
+                                        return { ...item, options, correctAnswer }
+                                      }),
+                                    }))}
+                                    className="text-xs text-red-500"
+                                  >
+                                    ×
+                                  </button>
+                                ) : null}
+                              </div>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => setExamForm((prev) => ({
+                                ...prev,
+                                questions: prev.questions.map((item, i) => {
+                                  if (i !== idx) return item
+                                  const nextKey = String.fromCharCode(65 + (item.options || []).length)
+                                  return { ...item, options: [...(item.options || []), { key: nextKey, label: '' }] }
+                                }),
+                              }))}
+                              className="text-xs text-sky-600 hover:underline"
+                            >
+                              + Add option
+                            </button>
+                            <p className="text-[11px] text-slate-400">Green letter = correct answer</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-sm font-semibold text-slate-700">Essay Questions</p>
+                        <button
+                          type="button"
+                          onClick={() => setExamForm((prev) => ({ ...prev, questions: [...prev.questions, { text: '' }] }))}
+                          className="inline-flex items-center gap-1 text-xs rounded-lg bg-slate-100 px-2.5 py-1.5 hover:bg-slate-200"
+                        >
+                          <Plus size={14} /> Add question
+                        </button>
+                      </div>
+                      <div className="space-y-3">
+                        {examForm.questions.map((q, idx) => (
+                          <div key={idx} className="flex items-start gap-2">
+                            <span className="text-xs font-bold text-slate-400 pt-2.5">Q{idx + 1}</span>
+                            <textarea
+                              className="w-full border rounded-lg px-3 py-2 text-sm"
+                              rows={3}
+                              placeholder="Question text"
+                              value={q.text}
+                              onChange={(event) => setExamForm((prev) => ({
+                                ...prev,
+                                questions: prev.questions.map((item, i) => (i === idx ? { ...item, text: event.target.value } : item)),
+                              }))}
+                            />
+                            {examForm.questions.length > 1 ? (
+                              <button
+                                type="button"
+                                onClick={() => setExamForm((prev) => ({
+                                  ...prev,
+                                  questions: prev.questions.filter((_, i) => i !== idx),
+                                }))}
+                                className="rounded-lg p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                              >
+                                <X size={16} />
+                              </button>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                    </div>
+                  <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+                    <button className="w-full btn btn-primary rounded-xl px-4 py-3 text-sm font-semibold">Save Exam</button>
+                  </div>
+                </form>
+
+                {/* Live preview */}
+                <div className="card card-pad card-hover sticky top-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-semibold text-slate-900">Student preview</h3>
+                    <span className={`text-[10px] font-semibold uppercase tracking-wide rounded-full px-2 py-0.5 ${examForm.examType === 'mcq' ? 'bg-sky-100 text-indigo-700' : 'bg-indigo-50 text-indigo-600'}`}>
+                      {examForm.examType === 'mcq' ? 'MCQ' : examForm.examType === 'paper' ? 'Paper' : 'Essay'}
+                    </span>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-4 space-y-4 max-h-[70vh] overflow-y-auto">
+                    <div>
+                      <p className="text-lg font-bold text-slate-900">{examForm.title || 'Untitled exam'}</p>
+                      {examForm.description ? <p className="text-sm text-slate-600 mt-1">{examForm.description}</p> : null}
+                      {examForm.dueDate ? <p className="text-xs text-slate-400 mt-1">Due {examForm.dueDate}</p> : null}
+                    </div>
+                    {examForm.examType === 'mcq' ? (
+                      <div className="space-y-3">
+                        <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-sky-800">
+                          Students enter their Access ID first, then see questions like this.
+                        </div>
+                        {examForm.questions.filter((q) => (q.text || '').trim() || (q.options || []).some((o) => (o.label || '').trim())).length === 0 ? (
+                          <p className="text-sm text-slate-400 text-center py-8">Add questions to preview them here.</p>
+                        ) : (
+                          examForm.questions.map((q, idx) => (
+                            <div key={idx} className="border border-slate-200 rounded-xl p-3 bg-white space-y-2">
+                              <p className="text-sm font-semibold text-slate-900">
+                                <span className="text-slate-400 mr-1.5">Q{idx + 1}.</span>
+                                {q.text || <span className="text-slate-300 italic">Question text…</span>}
+                              </p>
+                              <div className="space-y-1.5">
+                                {(q.options || []).filter((o) => (o.label || '').trim() || true).map((opt) => (
+                                  <div
+                                    key={opt.key}
+                                    className={`flex items-start gap-2 rounded-lg border px-2.5 py-2 text-sm ${
+                                      q.correctAnswer === opt.key ? 'border-emerald-300 bg-emerald-50' : 'border-slate-100 bg-slate-50'
+                                    }`}
+                                  >
+                                    <span className={`shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-[11px] font-bold ${
+                                      q.correctAnswer === opt.key ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 border border-slate-200'
+                                    }`}>
+                                      {opt.key}
+                                    </span>
+                                    <span className="pt-0.5 text-slate-700">{opt.label || <span className="text-slate-300 italic">Option…</span>}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          Essay questions are emailed to students as a paper list.
+                        </div>
+                        {examForm.questions.filter((q) => (q.text || '').trim()).length === 0 ? (
+                          <p className="text-sm text-slate-400 text-center py-8">Add questions to preview them here.</p>
+                        ) : (
+                          <ol className="space-y-3 list-decimal list-inside">
+                            {examForm.questions.map((q, idx) => (
+                              (q.text || '').trim() ? (
+                                <li key={idx} className="text-sm text-slate-800 bg-white border border-slate-200 rounded-xl px-3 py-2.5">
+                                  {q.text}
+                                </li>
+                              ) : null
+                            ))}
+                          </ol>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {examSavedListOpen ? (
+        <div
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex justify-end"
+          onClick={() => setExamSavedListOpen(false)}
+        >
+          <div
+            className="bg-white w-full max-w-lg h-full flex flex-col overflow-hidden shadow-2xl isolate"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="shrink-0 bg-white border-b border-slate-200 px-5 py-4 flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-slate-900">Saved Exams</h3>
+                <p className="text-xs text-slate-500 mt-0.5">{exams.length} for this course</p>
+              </div>
+              <button type="button" onClick={() => setExamSavedListOpen(false)} className="rounded-lg p-1 hover:bg-slate-100">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-3">
+              {examsLoading ? (
+                <p className="text-sm text-slate-400 py-6 text-center">Loading exams…</p>
+              ) : exams.length === 0 ? (
+                <p className="text-sm text-slate-400 py-6 text-center">No exams saved for this course yet.</p>
+              ) : (
+                exams.map((exam) => (
+                  <div key={exam.id} className="border border-slate-200 rounded-xl p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-slate-900">
+                          {exam.title}
+                          <span className={`ml-2 text-[10px] font-semibold uppercase tracking-wide rounded-full px-2 py-0.5 align-middle ${exam.exam_type === 'mcq' ? 'bg-sky-100 text-indigo-700' : 'bg-indigo-50 text-indigo-600'}`}>
+                            {exam.exam_type === 'mcq' ? 'MCQ' : exam.exam_type === 'paper' ? 'Paper' : 'Essay'}
+                          </span>
+                        </p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {exam.question_count} question(s)
+                          {' • '}{exam.delivery_count} delivered
+                          {exam.exam_type === 'mcq' ? ` • ${exam.submission_count || 0} submitted` : ''}
+                          {exam.plan_name ? ` • ${exam.plan_name} (${exam.plan_year})` : ''}
+                          {exam.due_date ? ` • Due ${fmtDate(exam.due_date)}` : ''}
+                        </p>
+                        {exam.take_url ? (
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <a href={exam.take_url} target="_blank" rel="noreferrer" className="text-xs text-indigo-700 underline break-all">{exam.take_url}</a>
+                            {exam.exam_type === 'mcq' ? (
+                              <>
+                                <span className="text-xs text-slate-500">Access code per student delivery</span>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-sm"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(exam.take_url)
+                                    notify('Link copied')
+                                  }}
+                                >
+                                  Copy Link
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(exam.take_url)
+                                  notify('Link copied')
+                                }}
+                              >
+                                Copy Link
+                              </button>
+                            )}
+                          </div>
+                        ) : null}
+                        {exam.description ? <p className="text-sm text-slate-600 mt-1">{exam.description}</p> : null}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 mt-3">
+                      <button
+                        type="button"
+                        onClick={() => { setExamSavedListOpen(false); openExamSend(exam) }}
+                        className="text-xs btn btn-primary px-3 py-1.5 hover:bg-slate-700"
+                      >
+                        Send Exam
+                      </button>
+                      {exam.exam_type === 'mcq' ? (
+                        <button
+                          type="button"
+                          onClick={() => { setExamSavedListOpen(false); openExamSubmissions(exam) }}
+                          className="text-xs rounded-lg bg-indigo-50 text-indigo-700 px-3 py-1.5 hover:bg-sky-100"
+                        >
+                          Submissions
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => deleteExamItem(exam.id)}
+                        className="text-xs rounded-lg bg-rose-50 text-rose-600 px-3 py-1.5 hover:bg-rose-100"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {examSubmissionsView ? (
+        <div
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setExamSubmissionsView(null)}
+        >
+          <div
+            className="bg-white rounded-[24px] shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden isolate"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="shrink-0 px-6 py-4 border-b border-slate-100 bg-white flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold text-slate-900">MCQ Submissions</h3>
+                <p className="text-sm text-slate-500 mt-0.5">{examSubmissionsView.title}</p>
+              </div>
+              <button type="button" onClick={() => setExamSubmissionsView(null)} className="rounded-lg p-1 hover:bg-slate-100">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-sm text-slate-600">{examSubmissions.length} submission(s)</p>
+              <button
+                type="button"
+                disabled={examResultsSending || !examSubmissions.some((s) => !s.result_sent_at)}
+                onClick={sendMcqResultsNow}
+                className="text-xs rounded-lg bg-emerald-600 text-white px-3 py-1.5 hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {examResultsSending ? 'Sending…' : 'Email results to students'}
+              </button>
+            </div>
+            {examSubmissionsLoading ? (
+              <p className="text-sm text-slate-400 py-6 text-center">Loading…</p>
+            ) : examSubmissions.length === 0 ? (
+              <p className="text-sm text-slate-400 py-6 text-center">No submissions yet.</p>
+            ) : (
+              <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                <table className="data-table w-full text-sm">
+                  <thead className="bg-slate-50 text-left text-xs text-slate-500 uppercase">
+                    <tr>
+                      <th className="px-3 py-2">Student</th>
+                      <th className="px-3 py-2">Score</th>
+                      <th className="px-3 py-2">Submitted</th>
+                      <th className="px-3 py-2">Result mailed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {examSubmissions.map((s) => (
+                      <tr key={s.id} className="border-t border-slate-100">
+                        <td className="px-3 py-2">
+                          <p className="font-medium text-slate-900">{s.student_name}</p>
+                          <p className="text-xs text-slate-400">{s.student_email}</p>
+                        </td>
+                        <td className="px-3 py-2 font-semibold text-slate-800">
+                          {s.score}% <span className="text-xs font-normal text-slate-400">({s.correct_count}/{s.total_questions})</span>
+                        </td>
+                        <td className="px-3 py-2 text-slate-600 text-xs">{s.submitted_at ? new Date(s.submitted_at).toLocaleString() : '—'}</td>
+                        <td className="px-3 py-2 text-xs">
+                          {s.result_sent_at ? (
+                            <span className="text-emerald-700">Sent {new Date(s.result_sent_at).toLocaleDateString()}</span>
+                          ) : (
+                            <span className="text-amber-600">Pending</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+          </div>
+        </div>
+      ) : null}
+
+      {examSendTarget ? (
+        <div
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setExamSendTarget(null)}
+        >
+          <div
+            className="bg-white rounded-[24px] shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden isolate"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="shrink-0 px-6 py-4 border-b border-slate-100 bg-white flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold text-slate-900">Send Exam</h3>
+                <p className="text-sm text-slate-500 mt-0.5">{examSendTarget.title}</p>
+              </div>
+              <button type="button" onClick={() => setExamSendTarget(null)} className="rounded-lg p-1 hover:bg-slate-100">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-semibold text-slate-700">Recipients ({examEligible.filter((s) => examSelected[s.id]).length})</p>
+              <div className="flex gap-2 text-xs">
+                <button
+                  type="button"
+                  className="rounded-lg bg-slate-100 px-2.5 py-1 hover:bg-slate-200"
+                  onClick={() => setExamSelected(Object.fromEntries(examEligible.map((s) => [s.id, true])))}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg bg-slate-100 px-2.5 py-1 hover:bg-slate-200"
+                  onClick={() => setExamSelected(Object.fromEntries(examEligible.map((s) => [s.id, false])))}
+                >
+                  None
+                </button>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mb-3">Students listed are those eligible for this course (by attendance). Uncheck anyone you don't want to receive it.</p>
+
+            <div className="border border-slate-200 rounded-xl max-h-56 overflow-y-auto divide-y divide-slate-100">
+              {examEligible.map((student) => (
+                <label key={student.id} className="flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 rounded"
+                    checked={Boolean(examSelected[student.id])}
+                    onChange={(e) => setExamSelected((prev) => ({ ...prev, [student.id]: e.target.checked }))}
+                  />
+                  <span className="text-sm text-slate-900">{student.full_name}</span>
+                  <span className="text-xs text-slate-500 ml-auto">{student.matric_no}</span>
+                </label>
+              ))}
+              {examEligible.length === 0 ? (
+                <p className="text-sm text-slate-400 p-4 text-center">No eligible students for this course yet.</p>
+              ) : null}
+            </div>
+
+            {examSendResult ? (
+              <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm">
+                <p className="text-emerald-700 font-medium">Sent to {examSendResult.sent} of {examSendResult.total} student(s).</p>
+                {examSendResult.failed > 0 ? (
+                  <p className="text-rose-600 mt-1">{examSendResult.failed} failed (see errors):</p>
+                ) : null}
+                {examSendResult.errors?.slice(0, 5).map((err, i) => (
+                  <p key={i} className="text-xs text-slate-500 mt-1">{err.student}: {err.error}</p>
+                ))}
+              </div>
+            ) : null}
+            </div>
+            <div className="shrink-0 px-6 py-4 border-t border-slate-100 bg-white flex gap-2 justify-end">
+              <button
+                type="button"
+                className="px-4 py-2 text-sm rounded-lg bg-slate-100 hover:bg-slate-200"
+                onClick={() => setExamSendTarget(null)}
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                disabled={examSending}
+                onClick={sendExamNow}
+                className="px-4 py-2 text-sm btn btn-primary disabled:opacity-50"
+              >
+                {examSending ? 'Sending…' : 'Send Exam'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {section === 'lecturers' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          <div className="grid lg:grid-cols-[360px_1fr] gap-4 flex-1 min-h-0 overflow-hidden">
+            {/* Create lecturer form — single-viewport: flex-col overflow-hidden, body scrolls */}
+            <form
+              className="card card-hover flex flex-col overflow-hidden max-h-[60vh]"
+              onSubmit={async (e) => {
+                e.preventDefault()
+                if (!lecturerForm.name.trim()) return
+                try {
+                  await apiClient.post('/lecturers', lecturerForm)
+                  setLecturerForm({ name: '', email: '', phone: '' })
+                  await loadLecturers()
+                  notify('Lecturer added')
+                } catch (err) {
+                  notify(err?.response?.data?.message || 'Unable to add lecturer')
+                }
+              }}
+            >
+              <div className="shrink-0 px-5 py-4 border-b border-slate-100 bg-white">
+                <h3 className="font-semibold text-slate-900">Add Lecturer</h3>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">
+                <label className="text-sm text-slate-600 block">
+                  Name *
+                  <input
+                    className="mt-1 w-full border rounded-lg px-3 py-2"
+                    placeholder="Full name"
+                    value={lecturerForm.name}
+                    onChange={(e) => setLecturerForm((p) => ({ ...p, name: e.target.value }))}
+                    required
+                  />
+                </label>
+                <label className="text-sm text-slate-600 block">
+                  Email
+                  <input
+                    type="email"
+                    className="mt-1 w-full border rounded-lg px-3 py-2"
+                    placeholder="email@example.com"
+                    value={lecturerForm.email}
+                    onChange={(e) => setLecturerForm((p) => ({ ...p, email: e.target.value }))}
+                  />
+                </label>
+                <label className="text-sm text-slate-600 block">
+                  Phone
+                  <input
+                    className="mt-1 w-full border rounded-lg px-3 py-2"
+                    placeholder="+1 234 567 8900"
+                    value={lecturerForm.phone}
+                    onChange={(e) => setLecturerForm((p) => ({ ...p, phone: e.target.value }))}
+                  />
+                </label>
+              </div>
+              <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+                <button className="w-full btn btn-primary btn-sm lift">Add Lecturer</button>
+              </div>
+            </form>
+
+            {/* Lecturers list — graduation matrix yardstick */}
+            <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden">
+              <div className="shrink-0 px-4 py-3 border-b border-slate-100">
+                <h3 className="font-semibold text-slate-900">All Lecturers ({lecturers.length})</h3>
+              </div>
+              <div className="flex-1 min-h-0 overflow-auto">
+                {lecturers.length === 0 ? (
+                  <p className="text-sm text-slate-400 p-4">No lecturers yet. Add one using the form.</p>
+                ) : (
+                  <table className="data-table w-full text-sm">
+                    <thead className="text-left text-slate-500 border-b border-slate-200 sticky top-0 bg-white">
+                      <tr>
+                        <th className="pb-2 pr-4 px-4">Name</th>
+                        <th className="pb-2 pr-4">Email</th>
+                        <th className="pb-2 pr-4">Phone</th>
+                        <th className="pb-2 pr-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {lecturers.map((l) => (
+                        <tr key={l.id} className="border-t border-slate-100">
+                          {editingLecturerId === l.id ? (
+                            <>
+                              <td className="py-2 pr-2 pl-4">
+                                <input
+                                  className="w-full border rounded px-2 py-1 text-sm"
+                                  value={lecturerEditForm.name}
+                                  onChange={(e) => setLecturerEditForm((p) => ({ ...p, name: e.target.value }))}
+                                />
+                              </td>
+                              <td className="py-2 pr-2">
+                                <input
+                                  type="email"
+                                  className="w-full border rounded px-2 py-1 text-sm"
+                                  value={lecturerEditForm.email}
+                                  onChange={(e) => setLecturerEditForm((p) => ({ ...p, email: e.target.value }))}
+                                />
+                              </td>
+                              <td className="py-2 pr-2">
+                                <input
+                                  className="w-full border rounded px-2 py-1 text-sm"
+                                  value={lecturerEditForm.phone}
+                                  onChange={(e) => setLecturerEditForm((p) => ({ ...p, phone: e.target.value }))}
+                                />
+                              </td>
+                              <td className="py-2 pr-4 whitespace-nowrap text-right">
+                                <button
+                                  type="button"
+                                  className="btn btn-primary btn-sm lift mr-1"
+                                  onClick={async () => {
+                                    try {
+                                      await apiClient.put(`/lecturers/${l.id}`, lecturerEditForm)
+                                      setEditingLecturerId(null)
+                                      await loadLecturers()
+                                      notify('Lecturer updated')
+                                    } catch (err) {
+                                      notify(err?.response?.data?.message || 'Unable to update lecturer')
+                                    }
+                                  }}
+                                >Save</button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-sm lift"
+                                  onClick={() => setEditingLecturerId(null)}
+                                >Cancel</button>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td className="py-3 pr-4 pl-4 font-medium">{l.name}</td>
+                              <td className="py-3 pr-4 text-slate-500">{l.email || '—'}</td>
+                              <td className="py-3 pr-4 text-slate-500">{l.phone || '—'}</td>
+                              <td className="py-3 pr-4 whitespace-nowrap text-right">
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-sm lift mr-1"
+                                  onClick={() => {
+                                    setEditingLecturerId(l.id)
+                                    setLecturerEditForm({ name: l.name, email: l.email || '', phone: l.phone || '' })
+                                  }}
+                                >Edit</button>
+                                <button
+                                  type="button"
+                                  className="btn btn-danger btn-sm lift"
+                                  onClick={async () => {
+                                    if (!(await dialogConfirm(`"${l.name}" will be removed from the lecturer list.`, { title: `Delete lecturer "${l.name}"?`, confirmLabel: 'Delete' }))) return
+                                    try {
+                                      await apiClient.delete(`/lecturers/${l.id}`)
+                                      await loadLecturers()
+                                      notify('Lecturer deleted')
+                                    } catch (err) {
+                                      notify(err?.response?.data?.message || 'Unable to delete lecturer')
+                                    }
+                                  }}
+                                >Delete</button>
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {section === 'email-process' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          <div className="flex-1 min-h-0 overflow-auto">
+            <EmailProcesses notify={notify} />
+          </div>
+        </div>
+      ) : null}
+
+      {section === 'email-formats' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          <div className="flex-1 min-h-0 overflow-auto">
+            <EmailFormats notify={notify} />
+          </div>
+        </div>
+      ) : null}
+
+      {section === 'settings' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          {/* Tab bar — shrink-0 */}
+          <div className="shrink-0 flex gap-1 bg-slate-100 rounded-xl p-1 w-fit">
+            {[
+              { key: 'school', label: 'School Info', icon: Building2 },
+              { key: 'appearance', label: 'Appearance', icon: Palette },
+              { key: 'integrations', label: 'Integrations', icon: Plug },
+              { key: 'recipients', label: 'Recipients', icon: Users },
+              { key: 'system', label: 'System', icon: Shield },
+            ].map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setSettingsTab(key)}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                  settingsTab === key ? 'bg-white text-indigo-700 shadow-sm border border-indigo-100' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                <Icon size={14} />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Content — flex-1 overflow-auto */}
+          <div className="flex-1 min-h-0 overflow-auto pr-1 space-y-4 [scrollbar-width:thin]">
+            {/* ── SCHOOL INFO ── */}
+            {settingsTab === 'school' ? (
+              <div className="space-y-4">
+                <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                      <h3 className="font-display font-bold tracking-tight text-slate-900 text-lg flex items-center gap-2"><Building2 size={18} className="text-indigo-600" /> School Information</h3>
+                      <p className="text-sm text-slate-500 mt-1">This is the source of truth for every email template. Values feed <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">{'{{school_*}}'}</code> variables and are used as fallbacks where <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">example_value</code> is hardcoded.</p>
+                    </div>
+                    <span className="hidden md:inline-flex items-center gap-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-full px-2.5 py-1"><Sparkles size={12} /> Email variables</span>
+                  </div>
+                  {schoolLoading ? (
+                    <p className="text-sm text-slate-400 py-6 text-center">Loading school info…</p>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <label className="text-sm text-slate-700 block">
+                          School name <span className="text-red-500">*</span> <span className="font-mono text-[10px] text-slate-400 ml-1">{'{{school_name}}'}</span>
+                          <input className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" placeholder="Grace Theological Seminary" value={schoolInfo.school_name} onChange={(e) => setSchoolInfo((p) => ({ ...p, school_name: e.target.value }))} required />
+                        </label>
+                        <label className="text-sm text-slate-700 block">
+                          Short name <span className="font-mono text-[10px] text-slate-400 ml-1">GTS</span>
+                          <input className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" placeholder="GTS" value={schoolInfo.short_name} onChange={(e) => setSchoolInfo((p) => ({ ...p, short_name: e.target.value }))} />
+                        </label>
+                      </div>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <label className="text-sm text-slate-700 block">
+                          Email <span className="font-mono text-[10px] text-slate-400 ml-1">{'{{school_email}}'}</span>
+                          <input type="email" className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" placeholder="info@gts.edu.ng" value={schoolInfo.school_email} onChange={(e) => setSchoolInfo((p) => ({ ...p, school_email: e.target.value }))} />
+                        </label>
+                        <label className="text-sm text-slate-700 block">
+                          Phone <span className="font-mono text-[10px] text-slate-400 ml-1">{'{{school_phone}}'}</span>
+                          <input className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" placeholder="+234..." value={schoolInfo.school_phone} onChange={(e) => setSchoolInfo((p) => ({ ...p, school_phone: e.target.value }))} />
+                        </label>
+                      </div>
+                      <label className="text-sm text-slate-700 block">
+                        Address <span className="font-mono text-[10px] text-slate-400 ml-1">{'{{school_address}}'}</span>
+                        <textarea className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" rows={2} placeholder="123 Education Street, Lagos" value={schoolInfo.school_address} onChange={(e) => setSchoolInfo((p) => ({ ...p, school_address: e.target.value }))} />
+                      </label>
+                      <label className="text-sm text-slate-700 block">
+                        Logo URL <span className="text-xs text-slate-400">for email header</span>
+                        <input className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" placeholder="https://gts.edu.ng/logo.png" value={schoolInfo.logo_url} onChange={(e) => setSchoolInfo((p) => ({ ...p, logo_url: e.target.value }))} />
+                        {schoolInfo.logo_url ? <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 p-3 flex items-center gap-3"><img src={schoolInfo.logo_url} alt="Logo preview" className="h-10 w-auto object-contain bg-white rounded-lg border border-slate-200 px-2 py-1" onError={(e) => (e.target.style.display = 'none')} /><span className="text-xs text-slate-500">Preview</span></div> : null}
+                      </label>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <label className="text-sm text-slate-700 block">
+                          Academic year
+                          <input className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" placeholder="2025/2026" value={schoolInfo.academic_year} onChange={(e) => setSchoolInfo((p) => ({ ...p, academic_year: e.target.value }))} />
+                        </label>
+                        <label className="text-sm text-slate-700 block">
+                          Current session
+                          <input className="mt-1 w-full border rounded-lg px-3 py-2 text-sm" placeholder="First Semester" value={schoolInfo.current_session} onChange={(e) => setSchoolInfo((p) => ({ ...p, current_session: e.target.value }))} />
+                        </label>
+                      </div>
+                      <div className="flex justify-end pt-2">
+                        <button type="button" onClick={saveSchoolInfo} disabled={schoolSaving} className="btn btn-primary btn-sm lift disabled:opacity-50">
+                          {schoolSaving ? 'Saving…' : 'Save School Info'}
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-400">Saved via <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">PATCH /settings</code> with <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">{`{settings: {school_*}}`}</code>. On load: <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">GET /settings</code>.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {/* ── APPEARANCE ── */}
+            {settingsTab === 'appearance' ? (
+              <div className="space-y-4">
+                <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                  <h3 className="font-display font-bold tracking-tight text-slate-900 text-lg flex items-center gap-2"><Palette size={18} className="text-indigo-600" /> Appearance</h3>
+                  <p className="text-sm text-slate-500 mt-1">Customize theme and density. Saved to <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">PATCH /settings</code> with <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">{`{settings: {theme, font_size}}`}</code> + localStorage.</p>
+                  <div className="grid md:grid-cols-2 gap-6 mt-5">
+                    <div className="space-y-3">
+                      <p className="text-sm font-medium text-slate-700">Theme</p>
+                      <div className="space-y-2">
+                        {[
+                          { key: 'light', label: 'Light', desc: 'Clean white background' },
+                          { key: 'dim', label: 'Dim', desc: 'Muted dark for low light' },
+                          { key: 'light-dim', label: 'Light-dim', desc: 'Soft off-white' },
+                        ].map(({ key, label, desc }) => (
+                          <label key={key} className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors ${appearance.theme === key ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+                            <input type="radio" name="gts-theme" value={key} checked={appearance.theme === key} onChange={() => setAppearance((p) => ({ ...p, theme: key }))} className="w-4 h-4" />
+                            <span className="flex-1">
+                              <span className="block text-sm font-medium text-slate-800">{label}</span>
+                              <span className="block text-xs text-slate-400">{desc}</span>
+                            </span>
+                            {appearance.theme === key ? <span className="h-2 w-2 rounded-full bg-indigo-600" /> : null}
+                          </label>
+                        ))}
+                      </div>
+                      <p className="text-sm font-medium text-slate-700 pt-2">Font size / density</p>
+                      <div className="flex gap-1 bg-slate-100 rounded-xl p-1 w-fit">
+                        {[
+                          { key: 'comfortable', label: 'Comfortable' },
+                          { key: 'compact', label: 'Compact' },
+                        ].map(({ key, label }) => (
+                          <button key={key} type="button" onClick={() => setAppearance((p) => ({ ...p, fontSize: key }))} className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${appearance.fontSize === key ? 'bg-white text-indigo-700 shadow-sm border border-indigo-100' : 'text-slate-500 hover:text-slate-700'}`}>{label}</button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-slate-400">Compact is ideal for dense tables.</p>
+                      <button type="button" onClick={saveAppearance} disabled={appearanceSaving} className="btn btn-primary btn-sm lift disabled:opacity-50 mt-2">{appearanceSaving ? 'Saving…' : 'Save Appearance'}</button>
+                    </div>
+                    <div className="space-y-3">
+                      <p className="text-sm font-medium text-slate-700">Preview</p>
+                      <div className={`rounded-[20px] border border-slate-200 p-4 shadow-sm transition-colors ${appearance.theme === 'dim' ? 'bg-slate-900 text-slate-100 border-slate-800' : appearance.theme === 'light-dim' ? 'bg-[#F8FAFC] text-slate-900' : 'bg-white text-slate-900'}`}>
+                        <p className="font-display font-bold tracking-tight text-base">GTS Dashboard Preview</p>
+                        <p className="text-xs opacity-60 mt-1">Theme: {appearance.theme} · Font: {appearance.fontSize}</p>
+                        <div className={`mt-3 rounded-xl border p-3 ${appearance.theme === 'dim' ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                          <div className="flex items-center justify-between">
+                            <span className={`text-sm font-medium ${appearance.fontSize === 'compact' ? 'text-xs' : 'text-sm'}`}>Student Directory</span>
+                            <span className="text-xs bg-white border border-slate-200 rounded-full px-2 py-0.5 text-slate-600">24 students</span>
+                          </div>
+                          <div className={`mt-2 space-y-1.5 ${appearance.fontSize === 'compact' ? '[&>div]:py-1' : '[&>div]:py-2'}`}>
+                            <div className={`rounded-lg border px-3 flex items-center justify-between ${appearance.theme === 'dim' ? 'bg-slate-700 border-slate-600' : 'bg-white border-slate-200'}`}><span className="text-xs">Taiwo Ajibola</span><span className="text-[10px] bg-emerald-100 text-emerald-700 rounded-full px-1.5 py-0.5">Active</span></div>
+                            <div className={`rounded-lg border px-3 flex items-center justify-between ${appearance.theme === 'dim' ? 'bg-slate-700 border-slate-600' : 'bg-white border-slate-200'}`}><span className="text-xs">Grace Okon</span><span className="text-[10px] bg-amber-100 text-amber-700 rounded-full px-1.5 py-0.5">Prospective</span></div>
+                          </div>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-400">Default: Light. Use Light-dim for warmer whites.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {/* ── INTEGRATIONS ── */}
+            {settingsTab === 'integrations' ? (
+              <div className="space-y-4">
+                <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <h3 className="font-display font-bold tracking-tight text-slate-900 text-lg flex items-center gap-2"><Plug size={18} className="text-indigo-600" /> Integrations</h3>
+                      <p className="text-sm text-slate-500 mt-1">Book Ministry is now inside Settings. Website / Forms embed codes are below.</p>
+                    </div>
+                    <span className="text-xs rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 px-2.5 py-1 font-medium">Settings → Integrations</span>
+                  </div>
+                  <div className="flex gap-1 bg-slate-100 rounded-xl p-1 w-fit mt-4">
+                    {[
+                      { key: 'book-ministry', label: 'Book Ministry' },
+                      { key: 'lms', label: 'Student LMS' },
+                      { key: 'website', label: 'Website / Forms Embed' },
+                    ].map(({ key, label }) => (
+                      <button key={key} type="button" onClick={() => setIntegrationsSubTab(key)} className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${integrationsSubTab === key ? 'bg-white text-indigo-700 shadow-sm border border-indigo-100' : 'text-slate-500 hover:text-slate-700'}`}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {integrationsSubTab === 'book-ministry' ? (
+                  <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm bg-white overflow-hidden">
+                    <div className="shrink-0 px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                      <span className="text-sm font-semibold text-slate-700 flex items-center gap-2"><Library size={16} className="text-indigo-600" /> Book Ministry</span>
+                      <span className="text-xs text-slate-400">Moved from <code className="font-mono bg-white border border-slate-200 px-1.5 py-0.5 rounded">/lecturer/book-ministry</code> → <code className="font-mono bg-white border border-slate-200 px-1.5 py-0.5 rounded">Settings → Integrations → Book Ministry</code></span>
+                    </div>
+                    <div className="p-4">
+                      <SettingsBookMinistryPanel notify={notify} />
+                    </div>
+                  </div>
+                ) : integrationsSubTab === 'lms' ? (
+                  <LmsIntegrationPanel notify={notify} />
+                ) : (
+                  <div className="space-y-4">
+                    <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                      <h4 className="font-semibold text-slate-900 flex items-center gap-2"><ExternalLink size={16} className="text-indigo-600" /> Website / Forms Embed</h4>
+                      <p className="text-sm text-slate-500 mt-1">For each Form (<code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">GET /forms</code>), copy iframe / script / API code. Toggle Active / Paused and use Preview.</p>
+                    </div>
+                    {formsLoading ? (
+                      <p className="text-sm text-slate-400 py-6 text-center">Loading forms…</p>
+                    ) : !forms.length ? (
+                      <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-8 text-center bg-white">
+                        <FileText size={28} className="mx-auto text-slate-300 mb-2" />
+                        <p className="text-sm text-slate-500">No forms yet. Create one in <Link to="/lecturer/forms" className="text-indigo-600 underline">Forms</Link>.</p>
+                      </div>
+                    ) : (
+                      <div className="grid gap-4">
+                        {forms.map((form) => {
+                          const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000'
+                          const clientOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://admin.gtslagos.com'
+                          const iframeCode = `<iframe src="${clientOrigin}/forms/${form.slug}" height="600" style="width:100%;border:0;border-radius:12px"></iframe>`
+                          const scriptCode = `<script src="${clientOrigin}/forms/${form.slug}/embed.js"></script>`
+                          const apiCode = `${API_URL}/forms/${form.slug}/submit`
+                          const isActive = form.status === 'active'
+                          const copy = (text, id) => {
+                            navigator.clipboard.writeText(text)
+                            setCopiedEmbedId(id)
+                            setTimeout(() => setCopiedEmbedId(null), 1500)
+                            notify('Copied to clipboard')
+                          }
+                          return (
+                            <div key={form.id} className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                              <div className="flex items-start justify-between gap-3 flex-wrap">
+                                <div>
+                                  <h4 className="font-semibold text-slate-900">{form.title}</h4>
+                                  <p className="text-xs text-slate-500 mt-0.5 flex items-center gap-2 flex-wrap">
+                                    <code className="font-mono bg-slate-100 px-1.5 py-0.5 rounded">{form.slug}</code>
+                                    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${isActive ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                      <span className={`h-1.5 w-1.5 rounded-full ${isActive ? 'bg-emerald-500' : 'bg-slate-400'}`} />{isActive ? 'Active' : 'Paused'}</span>
+                                    {form.maps_to_student ? <span className="rounded-full bg-sky-100 text-indigo-700 px-2 py-0.5 text-[11px] font-medium">Student Application</span> : null}
+                                  </p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <button type="button" onClick={async () => {
+                                    const nextStatus = isActive ? 'closed' : 'active'
+                                    try {
+                                      await apiClient.patch(`/forms/${form.id}`, { status: nextStatus })
+                                      notify(`Form ${nextStatus === 'active' ? 'opened' : 'paused'}`)
+                                      const res = await apiClient.get('/forms')
+                                      setForms(res.data)
+                                    } catch (err) { notify(err?.response?.data?.message || 'Failed to update') }
+                                  }} className={`text-xs rounded-lg px-3 py-1.5 font-medium border ${isActive ? 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50' : 'bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700'}`}>
+                                    {isActive ? 'Pause' : 'Activate'}
+                                  </button>
+                                  <a href={`/forms/${form.slug}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs rounded-lg bg-slate-900 text-white px-3 py-1.5 hover:bg-slate-800"><ExternalLink size={12} /> View on website</a>
+                                </div>
+                              </div>
+                              <div className="mt-4 space-y-3">
+                                {[
+                                  { label: 'Iframe embed', code: iframeCode, id: `iframe-${form.id}` },
+                                  { label: 'Script embed', code: scriptCode, id: `script-${form.id}` },
+                                  { label: 'Direct API URL', code: apiCode, id: `api-${form.id}` },
+                                ].map(({ label, code, id }) => (
+                                  <div key={id} className="space-y-1.5">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-xs font-semibold text-slate-600">{label}</span>
+                                      <button type="button" onClick={() => copy(code, id)} className={`inline-flex items-center gap-1 text-xs rounded-lg px-2.5 py-1 border ${copiedEmbedId === id ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}>
+                                        <Copy size={12} />{copiedEmbedId === id ? 'Copied!' : 'Copy'}
+                                      </button>
+                                    </div>
+                                    <pre className="text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl p-3 overflow-x-auto whitespace-pre-wrap break-all text-slate-700">{code}</pre>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {/* ── RECIPIENTS & VARIABLES ── */}
+            {settingsTab === 'recipients' ? (
+              <div className="space-y-4">
+                <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                  <h3 className="font-display font-bold tracking-tight text-slate-900 text-lg flex items-center gap-2"><Users size={18} className="text-indigo-600" /> Recipients & Variables</h3>
+                  <p className="text-sm text-slate-500 mt-1">How email personalization works, which categories are real, and who can receive.</p>
+                </div>
+
+                <div className="rounded-[16px] border border-amber-200 bg-amber-50 px-4 py-3 flex items-start gap-3">
+                  <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold text-amber-900">Custom category removed — deprecated</p>
+                    <p className="text-xs text-amber-800 mt-1">The <code className="font-mono bg-white border border-amber-200 px-1 py-0.5 rounded">custom</code> category (<code className="font-mono bg-white border px-1 py-0.5 rounded">custom_01</code>, <code className="font-mono bg-white border px-1 py-0.5 rounded">custom_02</code>) is deprecated and will be ignored. Use real categories below. Existing templates using <code className="font-mono bg-white border px-1 py-0.5 rounded">{'{{custom_*}}'}</code> should migrate.</p>
+                  </div>
+                </div>
+
+                <div className="grid lg:grid-cols-2 gap-4">
+                  <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                    <h4 className="font-semibold text-slate-900 text-sm mb-3">Real variable categories</h4>
+                    <div className="space-y-2.5 text-sm">
+                      {[
+                        { key: 'student', desc: 'Student record', vars: 'student_name, student_email, student_phone, student_id, student_status, enrollment_date, matric_no, cohort_name' },
+                        { key: 'course', desc: 'via Plan → Course', vars: 'course_name, course_code, course_start_date, course_end_date, course_description' },
+                        { key: 'assignment', desc: 'Assignment', vars: 'assignment_title, assignment_description, due_date, assignment_instructions, total_points' },
+                        { key: 'exam', desc: 'Exam / quiz', vars: 'exam_title, exam_link, access_code, due_date, course_title' },
+                        { key: 'instructor', desc: 'auto from course lecturer', vars: 'instructor_name, instructor_email' },
+                        { key: 'school', desc: 'from School Info tab', vars: 'school_name, school_email, school_address, school_phone, current_date' },
+                        { key: 'cohort', desc: 'Batch / cohort', vars: 'cohort_name, cohort_year, batch_name' },
+                        { key: 'report', desc: 'new — mailed reports', vars: 'report_title, report_period, report_link', badge: 'new' },
+                      ].map(({ key, desc, vars, badge }) => (
+                        <div key={key} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                          <div className="flex items-center gap-2">
+                            <code className="font-mono text-xs bg-white border border-slate-200 px-1.5 py-0.5 rounded font-semibold text-indigo-700">{key}</code>
+                            <span className="text-xs text-slate-500">{desc}</span>
+                            {badge ? <span className="text-[10px] font-bold tracking-wide uppercase bg-emerald-100 text-emerald-700 rounded-full px-2 py-0.5 border border-emerald-200">{badge}</span> : null}
+                          </div>
+                          <p className="font-mono text-[11px] text-slate-600 mt-1 break-all">{vars}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                      <h4 className="font-semibold text-slate-900 text-sm mb-2">Report variables (new)</h4>
+                      <p className="text-xs text-slate-500 mb-3">For when reports are mailed not just to students.</p>
+                      <div className="space-y-2">
+                        {[
+                          { k: 'report_title', label: 'Report Title', ex: 'Q1 Academic Report' },
+                          { k: 'report_period', label: 'Report Period', ex: 'Jan — Mar 2026' },
+                          { k: 'report_link', label: 'Report Link', ex: 'https://admin.gtslagos.com/reports/123' },
+                        ].map(({ k, label, ex }) => (
+                          <div key={k} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                            <div>
+                              <code className="font-mono text-xs font-semibold text-indigo-700">{`{{${k}}}`}</code>
+                              <span className="text-xs text-slate-500 ml-2">{label}</span>
+                            </div>
+                            <span className="font-mono text-[11px] text-slate-400">{ex}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                      <h4 className="font-semibold text-slate-900 text-sm mb-2">Recipients — expanded</h4>
+                      <p className="text-xs text-slate-500 mb-3">Send modal will support these audiences (documentation for now; expansion is future work).</p>
+                      <div className="space-y-3 text-sm">
+                        <div className="rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2.5">
+                          <p className="font-medium text-indigo-900 flex items-center gap-1.5"><Users size={14} /> Students</p>
+                          <p className="text-xs text-indigo-800 mt-1">Including <strong>Prospective</strong> — filter <code className="font-mono bg-white border border-indigo-200 px-1 py-0.5 rounded text-[11px]">status=Prospective</code> (<code className="font-mono bg-white border px-1 py-0.5 rounded">GET /students?status=Prospective</code>). Use for admissions comms.</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                          <p className="font-medium text-slate-800 flex items-center gap-1.5"><UserCog size={14} /> Lecturers</p>
+                          <p className="text-xs text-slate-600 mt-1"><code className="font-mono bg-white border px-1 py-0.5 rounded">GET /lecturers</code> or <code className="font-mono bg-white border px-1 py-0.5 rounded">GET /users?role=lecturer</code>. For staff reports and coordination.</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                          <p className="font-medium text-slate-800 flex items-center gap-1.5"><Mail size={14} /> External emails</p>
+                          <p className="text-xs text-slate-600 mt-1">Paste comma-separated emails in a textarea. For partners, parents, alumni outside the DB.</p>
+                          <textarea className="mt-2 w-full border rounded-lg px-3 py-2 text-xs font-mono bg-slate-50" rows={2} placeholder="parent@example.com, partner@gts.edu.ng, alumni@example.com" readOnly />
+                          <p className="text-[11px] text-slate-400 mt-1">Future Send modal will validate and de-duplicate.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                  <h4 className="font-semibold text-slate-900 text-sm mb-2">Variable mapping tips</h4>
+                  <ul className="text-xs text-slate-600 list-disc pl-4 space-y-1 leading-relaxed">
+                    <li><code className="font-mono bg-slate-100 px-1 py-0.5 rounded">{'{{course_*}}'}</code> resolves via <strong>Plan → Course</strong> link; <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">{'{{instructor_*}}'}</code> is auto-derived from the course lecturer.</li>
+                    <li><code className="font-mono bg-slate-100 px-1 py-0.5 rounded">{'{{school_*}}'}</code> falls back to School Info tab when template_variables example_value is placeholder.</li>
+                    <li>Use <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">{'{{report_*}}'}</code> only in report-mailing templates, not per-student notices.</li>
+                  </ul>
+                </div>
+              </div>
+            ) : null}
+
+            {/* ── SYSTEM ── */}
+            {settingsTab === 'system' ? (
+              <div className="space-y-4">
+                <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                  <h3 className="font-display font-bold tracking-tight text-slate-900 text-lg flex items-center gap-2"><Shield size={18} className="text-indigo-600" /> System</h3>
+                  <p className="text-sm text-slate-500 mt-1">Credentials UI has been removed. Manage system info and danger zone below.</p>
+                </div>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                    <h4 className="font-semibold text-slate-900 text-sm">Version</h4>
+                    <div className="mt-3 flex items-baseline gap-3">
+                      <span className="font-mono text-2xl font-bold tracking-tight text-slate-900">v1.0.0</span>
+                      <span className="text-xs rounded-full bg-slate-100 text-slate-600 px-2.5 py-1 font-medium border border-slate-200">build 2026.08</span>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-2">GTS Academic Platform · Lecturer Dashboard</p>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                      <span className="rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 font-medium">API: {import.meta.env.VITE_API_URL || 'http://localhost:5000'}</span>
+                      <span className="rounded-full bg-slate-50 text-slate-600 border border-slate-200 px-2.5 py-1 font-mono">{typeof window !== 'undefined' ? window.location.origin : ''}</span>
+                    </div>
+                  </div>
+                  <div className="rounded-[24px] border border-amber-200 bg-amber-50 p-5 shadow-sm">
+                    <h4 className="font-semibold text-amber-900 text-sm flex items-center gap-2"><AlertTriangle size={16} /> Danger zone — placeholder</h4>
+                    <p className="text-xs text-amber-800 mt-1">Destructive actions will be added here. No operation is wired yet.</p>
+                    <div className="mt-4 space-y-2">
+                      <button type="button" disabled className="w-full rounded-xl border border-amber-200 bg-white text-amber-700 px-4 py-2 text-sm font-medium opacity-60 cursor-not-allowed">Clear cached reports</button>
+                      <button type="button" disabled className="w-full rounded-xl border border-red-200 bg-white text-red-600 px-4 py-2 text-sm font-medium opacity-60 cursor-not-allowed">Reset all settings to defaults</button>
+                    </div>
+                    <p className="text-[11px] text-amber-700 mt-2 italic">Buttons disabled — coming soon.</p>
+                  </div>
+                </div>
+                <div className="card card-hover rounded-[24px] border border-slate-200 shadow-sm p-5 bg-white">
+                  <h4 className="font-semibold text-slate-900 text-sm">Other system notes</h4>
+                  <ul className="text-xs text-slate-600 list-disc pl-4 mt-2 space-y-1 leading-relaxed">
+                    <li>Single-viewport layout preserved: header tabs are <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">shrink-0</code>, content is <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">flex-1 min-h-0 overflow-auto</code>.</li>
+                    <li>Credentials tab removed per spec — use System &gt; Users or Lecturers for account management.</li>
+                    <li>Appearance lives in localStorage (<code className="font-mono bg-slate-100 px-1 py-0.5 rounded">gts_theme</code>, <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">gts_font_size</code>) + backend <code className="font-mono bg-slate-100 px-1 py-0.5 rounded">PATCH /settings</code>.</li>
+                  </ul>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {section === 'reports' ? (
+        <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+          {/* Filter Header — shrink-0 (report content header, PageHeader removed) */}
+          <div className="shrink-0 card card-pad card-hover flex flex-wrap gap-4 items-center justify-between">
+            <div>
+              <h2 className="text-xl font-bold text-slate-900">Reporting & Analytics</h2>
+              <p className="text-sm text-slate-500">Comprehensive system performance and academic metrics.</p>
+            </div>
+            <div className="flex gap-3">
+              <select
+                className="border rounded-lg px-3 py-2 text-sm"
+                value={reportFilters.year}
+                onChange={(e) => setReportFilters(prev => ({ ...prev, year: e.target.value }))}
+              >
+                <option value="">All Years</option>
+                {[2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+              <select
+                className="border rounded-lg px-3 py-2 text-sm"
+                value={reportFilters.courseId}
+                onChange={(e) => setReportFilters(prev => ({ ...prev, courseId: e.target.value }))}
+              >
+                <option value="">All Courses</option>
+                {courses.map(c => <option key={c.id} value={c.id}>{c.title}</option>)}
+              </select>
+              <button
+                onClick={loadReports}
+                className="btn btn-primary btn-sm lift"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          {reportLoading && !reportStats ? (
+            <div className="flex justify-center p-20"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-slate-900"></div></div>
+          ) : (
+            <div className="flex-1 min-h-0 overflow-auto space-y-4 pr-1">
+              {/* Summary Cards */}
+              <div className="bento bento-4 gap-4">
+                <div className="card card-pad card-hover">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="ico h-10 w-10 text-indigo-600"><Users className="w-5 h-5" /></div>
+                    <span className="text-xs font-medium text-slate-500 uppercase">Students</span>
+                  </div>
+                  <div className="text-2xl font-bold text-slate-900">{reportStats?.students?.total_students || 0}</div>
+                  <div className="flex gap-2 mt-2">
+                    <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded-full">{reportStats?.students?.active_students} Active</span>
+                    <span className="text-xs px-2 py-0.5 bg-slate-50 text-slate-600 rounded-full">{reportStats?.students?.prospective_students} Pros.</span>
+                  </div>
+                </div>
+
+                <div className="card card-pad card-hover">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="ico h-10 w-10 text-violet-600"><BookOpen className="w-5 h-5" /></div>
+                    <span className="text-xs font-medium text-slate-500 uppercase">Courses</span>
+                  </div>
+                  <div className="text-2xl font-bold text-slate-900">{reportStats?.courses?.total_courses || 0}</div>
+                  <div className="text-xs text-slate-500 mt-2">{reportStats?.courses?.active_courses} Currently active</div>
+                </div>
+
+                <div className="card card-pad card-hover">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="ico h-10 w-10 text-indigo-600"><ClipboardCheck className="w-5 h-5" /></div>
+                    <span className="text-xs font-medium text-slate-500 uppercase">Attendance</span>
+                  </div>
+                  <div className="text-2xl font-bold text-slate-900">{attendanceReport?.summary?.avg_attendance_rate || 0}%</div>
+                  <div className="text-xs text-slate-500 mt-2">Average across all sessions</div>
+                </div>
+
+                <div className="card card-pad card-hover">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="ico h-10 w-10 text-emerald-600"><GraduationCap className="w-5 h-5" /></div>
+                    <span className="text-xs font-medium text-slate-500 uppercase">Graduation</span>
+                  </div>
+                  <div className="text-2xl font-bold text-slate-900">{reportStats?.students?.graduating_students || 0}</div>
+                  <div className="text-xs text-slate-500 mt-2">Candidates for completion</div>
+                </div>
+              </div>
+
+              {/* Attendance Table — graduation matrix yardstick: card flex-col overflow-hidden with inner overflow-auto */}
+              <div className="card card-hover flex flex-col flex-1 min-h-0 overflow-hidden isolate rounded-[24px]">
+                <div className="shrink-0 px-5 py-4 border-b border-slate-200 bg-white rounded-t-[24px] flex justify-between items-center">
+                  <h3 className="font-semibold text-slate-900">Attendance & Eligibility Detail</h3>
+                  <div className="flex gap-2 text-sm text-slate-500">
+                    <span>Eligible: <b className="text-green-600">{attendanceReport?.summary?.eligible_students}</b></span>
+                    <span>Ineligible: <b className="text-red-600">{attendanceReport?.summary?.ineligible_students}</b></span>
+                  </div>
+                </div>
+                <div className="flex-1 min-h-0 overflow-auto">
+                  <table className="data-table w-full text-sm text-left">
+                    <thead className="bg-[#F8FAFC] text-[#64748B] uppercase text-[0.68rem] font-bold tracking-[0.08em] sticky top-0">
+                      <tr>
+                        <th className="px-4 py-3">Student</th>
+                        <th className="px-4 py-3">Course</th>
+                        <th className="px-4 py-3">Sessions</th>
+                        <th className="px-4 py-3">Present</th>
+                        <th className="px-4 py-3">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {attendanceReport?.data?.map((row, idx) => (
+                        <tr key={idx} className="hover:bg-[#EEF2FF] [&>td]:hover:bg-transparent hover:shadow-[inset_3px_0_0_#6366f1] transition-colors">
+                          <td className="px-4 py-3 font-medium text-slate-900">{row.full_name}</td>
+                          <td className="px-4 py-3 text-slate-600">{row.course_title}</td>
+                          <td className="px-4 py-3">{row.total_sessions}</td>
+                          <td className="px-4 py-3">{row.present_count}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase ${
+                              row.eligibility_status === 'Eligible'
+                                ? 'bg-green-100 text-green-700'
+                                : 'bg-red-100 text-red-700'
+                            }`}>
+                              {row.eligibility_status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
+      {section === 'prospective-students' ? (
+        <div className="space-y-6 flex-1 min-h-0 overflow-auto">
+          <div>
+            <h2 className="text-xl font-bold text-slate-900">Prospective Students</h2>
+            <p className="text-sm text-slate-500 mt-1">Students created from approved form submissions.</p>
+          </div>
+
+          {prospectiveStudentsLoading ? (
+            <p className="text-sm text-slate-500">Loading...</p>
+          ) : (
+            <div className="card card-hover overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="data-table w-full text-sm">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200">
+                      <th className="text-left px-4 py-3 font-medium text-slate-700">Name</th>
+                      <th className="text-left px-4 py-3 font-medium text-slate-700">Email</th>
+                      <th className="text-left px-4 py-3 font-medium text-slate-700">Form</th>
+                      <th className="text-left px-4 py-3 font-medium text-slate-700">Cohort</th>
+                      <th className="text-left px-4 py-3 font-medium text-slate-700">Submitted</th>
+                      <th className="text-left px-4 py-3 font-medium text-slate-700">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {prospectiveStudents.map((s) => (
+                      <tr key={s.student_id} className="border-b border-slate-100 hover:bg-slate-50">
+                        <td className="px-4 py-3 font-medium text-slate-900">{s.full_name}</td>
+                        <td className="px-4 py-3 text-slate-600">{s.email}</td>
+                        <td className="px-4 py-3 text-slate-600">{s.form_title || '-'}</td>
+                        <td className="px-4 py-3 text-slate-600">
+                          {s.cohort_name || '-'}
+                        </td>
+                        <td className="px-4 py-3 text-slate-500 text-xs">
+                          {s.submitted_at ? new Date(s.submitted_at).toLocaleDateString() : '-'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="rounded-full px-2.5 py-0.5 text-xs font-medium bg-amber-100 text-amber-700">
+                            {s.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                    {!prospectiveStudents.length && (
+                      <tr>
+                        <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
+                          No prospective students yet. Approve submissions on student application forms to create them.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {section === 'forms' ? (
+        <div className="space-y-6 flex-1 min-h-0 overflow-auto">
+          {/* Forms header */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h1 className="font-display text-2xl md:text-[30px] font-extrabold tracking-[-0.04em] text-slate-900 leading-none">Form Builder</h1>
+              <p className="text-sm text-slate-500 mt-1">Create dynamic forms for applications, onboarding, and surveys. Graduation calendar is under Graduation.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => { setEditingForm(null); setFormBuilderOpen(true) }}
+              className="btn btn-primary rounded-xl px-4 py-2 text-sm"
+            >
+              New Form
+            </button>
+          </div>
+
+          {/* Forms list */}
+          {formsLoading ? (
+            <p className="text-sm text-slate-500">Loading forms...</p>
+          ) : (
+            <div className="grid gap-4">
+              {forms.map((form) => (
+                <div key={form.id} className="card card-pad card-hover">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3">
+                        <h3 className="font-semibold text-slate-900">{form.title}</h3>
+                        <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                          form.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
+                          form.status === 'closed' ? 'bg-red-100 text-red-700' :
+                          'bg-slate-100 text-slate-600'
+                        }`}>
+                          {form.status}
+                        </span>
+                      </div>
+                      {form.description && <p className="text-sm text-slate-500 mt-1">{form.description}</p>}
+                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                        {form.maps_to_student && (
+                          <span className="rounded-full px-2 py-0.5 text-xs font-medium bg-sky-100 text-indigo-700">
+                            Student Application
+                          </span>
+                        )}
+                        {form.cohort_name && (
+                          <span className="text-xs text-slate-400">Cohort: {form.cohort_name}</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-4 mt-2 text-xs text-slate-400">
+                        <span>Slug: <code className="bg-slate-100 px-1.5 py-0.5 rounded">{form.slug}</code></span>
+                        <span>{form.submission_count || 0} submissions</span>
+                        <span>{form.fields?.length || 0} fields</span>
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <code className="text-xs bg-indigo-50 text-indigo-700 px-2 py-1 rounded-lg border border-sky-200 break-all">
+                          {window.location.origin}/forms/{form.slug}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${window.location.origin}/forms/${form.slug}`)
+                            setCopiedFormId(form.id)
+                            setTimeout(() => setCopiedFormId(null), 2000)
+                          }}
+                          className={`text-xs rounded-lg px-2.5 py-1.5 shrink-0 transition-colors ${
+                            copiedFormId === form.id
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : 'bg-sky-100 text-indigo-700 hover:bg-sky-200'
+                          }`}
+                          title="Copy public link"
+                        >
+                          {copiedFormId === form.id ? 'Copied!' : 'Copy Link'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => toggleFormStatus(form)}
+                        className={`text-xs rounded-lg px-3 py-1.5 hover:brightness-95 ${
+                          form.status === 'active'
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : 'bg-emerald-600 text-white'
+                        }`}
+                        title={form.status === 'active' ? 'Stop accepting submissions' : 'Start accepting submissions'}
+                      >
+                        {form.status === 'active' ? 'Close' : 'Open'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedFormForSubmissions(form.id); loadFormSubmissions(form.id) }}
+                        className="text-xs bg-slate-100 text-slate-700 rounded-lg px-3 py-1.5 hover:bg-slate-200"
+                      >
+                        View Submissions
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openFormForEdit(form)}
+                        className="text-xs bg-sky-100 text-indigo-700 rounded-lg px-3 py-1.5 hover:bg-sky-200"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteForm(form.id)}
+                        className="text-xs btn btn-danger rounded-lg px-3 py-1.5 hover:bg-red-100"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {!forms.length && !formsLoading && (
+                <div className="card card-pad card-hover p-12 text-center">
+                  <p className="text-slate-500">No forms yet. Create your first form to get started.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Submissions drawer */}
+          {selectedFormForSubmissions && (
+            <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
+              <div className="bg-white w-full max-w-3xl h-full overflow-y-auto shadow-2xl">
+                <div className="sticky top-0 bg-white border-b border-slate-200 px-5 py-4 flex items-center justify-between">
+                  <h3 className="font-semibold text-slate-900">Submissions {formSubmissions.length > 0 && <span className="text-sm font-normal text-slate-500">({formSubmissions.length})</span>}</h3>
+                  <div className="flex items-center gap-2">
+                    {formSubmissions.length > 0 && (
+                      <>
+                        <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={emailSelection.size > 0 && emailSelection.size === formSubmissions.length}
+                            onChange={(e) =>
+                              setEmailSelection(
+                                e.target.checked
+                                  ? new Set(formSubmissions.map((s) => s.id))
+                                  : new Set()
+                              )
+                            }
+                          />
+                          Select all
+                        </label>
+                        <button
+                          type="button"
+                          disabled={emailSelection.size === 0}
+                          onClick={() => openEmailFor([...emailSelection])}
+                          className="btn btn-sm btn-ghost lift text-indigo-600 hover:bg-indigo-50 gap-1 disabled:opacity-40"
+                        >
+                          <Mail size={14} /> Email selected ({emailSelection.size})
+                        </button>
+                      </>
+                    )}
+                    {formSubmissions.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const response = await apiClient.get(
+                              `/forms/${selectedFormForSubmissions}/submissions/export`,
+                              { responseType: 'blob' }
+                            )
+                            const url = URL.createObjectURL(response.data)
+                            const a = document.createElement('a')
+                            a.href = url
+                            a.download = `${selectedFormForSubmissions}-submissions.xlsx`
+                            document.body.appendChild(a)
+                            a.click()
+                            a.remove()
+                            URL.revokeObjectURL(url)
+                          } catch (err) { console.error(err) }
+                        }}
+                        className="btn btn-sm btn-ghost lift text-indigo-600 hover:bg-indigo-50 gap-1"
+                      >
+                        <Download size={14}/> Export
+                      </button>
+                    )}
+                    <button type="button" onClick={() => setSelectedFormForSubmissions(null)} className="rounded-lg p-1 hover:bg-slate-100">
+                      <X size={18} />
+                    </button>
+                  </div>
+                </div>
+                <div className="p-5">
+                  {submissionsLoading ? (
+                    <p className="text-sm text-slate-500">Loading submissions...</p>
+                  ) : (
+                    <div className="space-y-4">
+                      {formSubmissions.map((sub) => (
+                        <div key={sub.id} className="border border-slate-200 rounded-xl p-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={emailSelection.has(sub.id)}
+                                onChange={() => toggleEmailSelect(sub.id)}
+                              />
+                              <div>
+                                {sub.submitter_name && <p className="font-medium text-slate-900">{sub.submitter_name}</p>}
+                                {sub.submitter_email && <p className="text-xs text-slate-500">{sub.submitter_email}</p>}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                                sub.status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
+                                sub.status === 'rejected' ? 'bg-red-100 text-red-700' :
+                                sub.status === 'reviewed' ? 'bg-sky-100 text-indigo-700' :
+                                'bg-slate-100 text-slate-600'
+                              }`}>
+                                {sub.status}
+                              </span>
+                              <span className="text-xs text-slate-400">{new Date(sub.created_at).toLocaleDateString()}</span>
+                              <button
+                                type="button"
+                                onClick={() => openEmailFor([sub.id])}
+                                className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline pl-1"
+                              >
+                                Email
+                              </button>
+                              {confirmDeleteId === sub.id ? (
+                                <span className="flex items-center gap-1.5 pl-1 border-l border-slate-200">
+                                  <span className="text-xs text-red-600">Delete?</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => deleteSubmission(sub.id)}
+                                    className="text-xs bg-red-600 text-white rounded-lg px-2 py-1 hover:bg-red-700"
+                                  >
+                                    Confirm
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteId(null)}
+                                    className="text-xs bg-slate-200 text-slate-700 rounded-lg px-2 py-1 hover:bg-slate-300"
+                                  >
+                                    Cancel
+                                  </button>
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteId(sub.id)}
+                                  className="text-xs text-red-500 hover:text-red-700 hover:underline pl-1"
+                                >
+                                  Delete
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          {/* Submission data */}
+                          <div className="bg-slate-50 rounded-lg p-3 text-sm space-y-1 mb-3">
+                            {Object.entries(sub.data || {}).map(([key, value]) => (
+                              <div key={key} className="flex gap-2">
+                                <span className="text-slate-500 shrink-0">{labelFor(key)}:</span>
+                                <span className="text-slate-800">{Array.isArray(value) ? value.join(', ') : String(value)}</span>
+                              </div>
+                            ))}
+                          </div>
+                          {/* Review actions */}
+                          {sub.status === 'submitted' && (
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => reviewSubmission(sub.id, 'approved')}
+                                className="text-xs bg-emerald-600 text-white rounded-lg px-3 py-1.5 hover:bg-emerald-700"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => reviewSubmission(sub.id, 'rejected')}
+                                className="text-xs bg-red-600 text-white rounded-lg px-3 py-1.5 hover:bg-red-700"
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          )}
+                          {sub.review_notes && (
+                            <p className="text-xs text-slate-500 mt-2">Notes: {sub.review_notes}</p>
+                          )}
+                        </div>
+                      ))}
+                      {!formSubmissions.length && !submissionsLoading && (
+                        <p className="text-sm text-slate-400 text-center py-8">No submissions yet.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <EmailComposeModal
+            open={emailModalOpen}
+            onClose={() => setEmailModalOpen(false)}
+            formId={selectedFormForSubmissions}
+            submissions={emailModalSubs}
+            fields={selectedFormFields}
+            onSent={(res) => {
+              setEmailModalOpen(false)
+              setEmailSelection(new Set())
+              notify(
+                `Emailed ${res.sent}, skipped ${res.skipped}` +
+                  (res.failed ? `, ${res.failed} failed` : '')
+              )
+            }}
+          />
+
+          {/* Form Builder Drawer */}
+          {formBuilderOpen && (
+            <FormBuilderDrawer
+              key={editingForm?.id || 'new'}
+              form={editingForm}
+              batches={batches}
+              onClose={() => { setFormBuilderOpen(false); setEditingForm(null) }}
+              onSave={saveForm}
+            />
+          )}
+        </div>
+      ) : null}
+
+      {/* ── Edit Session Modal ─────────────────────────────────────── */}
+      {editingSession ? (() => {
+        const presentList = editingSession.roster.filter((s) => s.present)
+        const absentList  = editingSession.roster.filter((s) => !s.present)
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+                <div>
+                  <h3 className="font-semibold text-slate-900">
+                    Class {editingSession.session.class_number} — Session Details
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {new Date(editingSession.session.start_time).toLocaleString()}
+                    {editingSession.session.end_time
+                      ? ` – ${new Date(editingSession.session.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                      : ''}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setEditingSession(null); setShowDeleteSessionConfirm(false); setDeleteSessionReason('') }}
+                  className="rounded-lg p-1.5 hover:bg-slate-100 text-slate-500"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Summary bar */}
+              <div className="flex gap-4 px-5 py-3 bg-slate-50 border-b border-slate-200 text-sm">
+                <span className="text-emerald-700 font-medium">{presentList.length} present</span>
+                <span className="text-slate-400">·</span>
+                <span className="text-red-600 font-medium">{absentList.length} absent</span>
+                <span className="text-slate-400">·</span>
+                <span className="text-slate-600">{editingSession.roster.length} total</span>
+              </div>
+
+              {/* Roster body */}
+              <div className="overflow-y-auto flex-1 px-5 py-4 space-y-5">
+                {editSessionLoading ? (
+                  <p className="text-sm text-slate-500">Loading roster…</p>
+                ) : (
+                  <>
+                    {/* Present */}
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700 mb-2">
+                        Present ({presentList.length})
+                      </p>
+                      {presentList.length === 0 ? (
+                        <p className="text-xs text-slate-400 italic">No students marked present</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {presentList.map((s) => (
+                            <li key={s.student_id} className="flex items-center justify-between rounded-lg bg-emerald-50 px-3 py-2">
+                              <div>
+                                <span className="text-sm font-medium text-slate-800">{s.full_name}</span>
+                                {s.matric_no && <span className="ml-2 text-xs text-slate-400">{s.matric_no}</span>}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => toggleSessionAttendance(editingSession.session.id, s.student_id)}
+                                className="text-xs rounded-lg px-3 py-1 bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-100"
+                              >
+                                Mark Absent
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
+                    {/* Absent */}
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-red-600 mb-2">
+                        Absent ({absentList.length})
+                      </p>
+                      {absentList.length === 0 ? (
+                        <p className="text-xs text-slate-400 italic">All students are marked present</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {absentList.map((s) => (
+                            <li key={s.student_id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
+                              <div>
+                                <span className="text-sm font-medium text-slate-800">{s.full_name}</span>
+                                {s.matric_no && <span className="ml-2 text-xs text-slate-400">{s.matric_no}</span>}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => toggleSessionAttendance(editingSession.session.id, s.student_id)}
+                                className="text-xs rounded-lg px-3 py-1 bg-white border border-slate-200 text-slate-600 hover:bg-slate-100"
+                              >
+                                Mark Present
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
+                    {/* Delete session */}
+                    <div className="pt-3 border-t border-red-100">
+                      {!showDeleteSessionConfirm ? (
+                        <button
+                          type="button"
+                          onClick={() => setShowDeleteSessionConfirm(true)}
+                          className="text-xs text-red-600 underline hover:text-red-800"
+                        >
+                          Delete this attendance session…
+                        </button>
+                      ) : (
+                        <div className="space-y-2">
+                          <p className="text-sm font-medium text-red-700">Delete Session</p>
+                          <p className="text-xs text-slate-500">
+                            This will permanently remove the session and all attendance records for Class {editingSession.session.class_number}. This cannot be undone.
+                          </p>
+                          <textarea
+                            className="w-full border border-red-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-300"
+                            rows={2}
+                            placeholder="Reason for deletion (required)"
+                            value={deleteSessionReason}
+                            onChange={(e) => setDeleteSessionReason(e.target.value)}
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={deleteSession}
+                              disabled={!deleteSessionReason.trim()}
+                              className="rounded-lg px-4 py-1.5 bg-red-600 text-white text-sm disabled:opacity-50 hover:bg-red-700"
+                            >
+                              Confirm Delete
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setShowDeleteSessionConfirm(false); setDeleteSessionReason('') }}
+                              className="rounded-lg px-4 py-1.5 bg-slate-100 text-slate-700 text-sm hover:bg-slate-200"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-5 py-3 border-t border-slate-200 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => { setEditingSession(null); setShowDeleteSessionConfirm(false); setDeleteSessionReason('') }}
+                  className="rounded-lg px-4 py-2 btn btn-primary text-sm"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })() : null}
+
+      {/* ── Add New Attendance modal ───────────────────────────────── */}
+      {showAddAttendance ? (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowAddAttendance(false)}>
+          <div className="bg-white rounded-[24px] shadow-2xl max-w-5xl w-full max-h-[90vh] flex flex-col overflow-hidden isolate" onClick={(e) => e.stopPropagation()}>
+            <div className="shrink-0 px-6 py-4 border-b border-slate-100 bg-white flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-slate-900">Add New Attendance</h3>
+                <p className="text-sm text-slate-500 mt-0.5">{selectedCourse ? `${selectedCourse.title} · Class ${selectedClassNumber}` : 'Select a course to start'}</p>
+              </div>
+              <button type="button" onClick={() => setShowAddAttendance(false)} className="rounded-lg p-1 hover:bg-slate-100">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-6">
+              <div className="grid lg:grid-cols-[380px_1fr] gap-6">
+                {/* Left = form */}
+                <div className="space-y-4">
+                  <label className="text-sm text-slate-600 block">
+                    Select Class
+                    <select className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={selectedClassNumber} onChange={(event) => setSelectedClassNumber(event.target.value)}>
+                      {classOptions.map((classNo) => (
+                        <option key={classNo} value={classNo}>{`Class ${classNo}`}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Session Date
+                    <input type="date" className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={attendanceForm.date} onChange={(event) => setAttendanceForm((prev) => ({ ...prev, date: event.target.value }))} />
+                  </label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm text-slate-600 block">
+                      Start Time
+                      <input type="time" className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={attendanceForm.startTime} onChange={(event) => setAttendanceForm((prev) => ({ ...prev, startTime: event.target.value }))} />
+                    </label>
+                    <label className="text-sm text-slate-600 block">
+                      End Time
+                      <input type="time" className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={attendanceForm.endTime} onChange={(event) => setAttendanceForm((prev) => ({ ...prev, endTime: event.target.value }))} />
+                    </label>
+                  </div>
+                  <label className="text-sm text-slate-600 block">
+                    Secondary Lecturer
+                    <select className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={attendanceForm.secondaryLecturerId || ''} onChange={(event) => setAttendanceForm((prev) => ({ ...prev, secondaryLecturerId: event.target.value || '' }))}>
+                      <option value="">— No secondary lecturer —</option>
+                      {lecturers.map((l) => (
+                        <option key={l.id} value={l.id}>{l.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm text-slate-600 block">
+                    Session Notes
+                    <textarea className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" rows={2} value={attendanceForm.lecturerNotes || ''} onChange={(event) => setAttendanceForm((prev) => ({ ...prev, lecturerNotes: event.target.value }))} placeholder="Optional notes for this session" />
+                  </label>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={startAttendance} disabled={!selectedCourseId || Boolean(attendanceStatus.classCompleted) || Boolean(attendanceStatus.activeSession)} className="flex-1 btn btn-primary px-4 py-2 disabled:opacity-50">Start Attendance</button>
+                    <button type="button" onClick={closeAttendance} disabled={!attendanceStatus.activeSession} className="flex-1 bg-slate-200 text-slate-800 rounded-lg px-4 py-2 disabled:opacity-50">Close Attendance</button>
+                  </div>
+                  <div className="rounded-xl bg-slate-100 px-4 py-3 text-sm text-slate-700 space-y-1">
+                    <p>Class: {selectedClassNumber}</p>
+                    <p>Completed: {attendanceStatus.classCompleted ? 'Yes' : 'No'}</p>
+                    <p>Active: {attendanceStatus.activeSession ? 'Yes' : 'No'}</p>
+                    <p>Ends: {attendanceStatus.activeSession?.end_time ? new Date(attendanceStatus.activeSession.end_time).toLocaleString() : '-'}</p>
+                    <p>Present: {attendanceStatus.attendeeCount || 0}</p>
+                  </div>
+                </div>
+                {/* Right = list of students */}
+                <div className="card card-hover flex flex-col overflow-hidden border border-slate-200 rounded-xl min-h-[420px] max-h-[62vh]">
+                  <div className="shrink-0 px-4 py-3 border-b border-slate-100 bg-white flex flex-col gap-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="font-semibold text-slate-900 text-sm">Enrolled Students</h4>
+                      <span className="text-xs bg-slate-100 text-slate-600 rounded-full px-2.5 py-1 font-medium">{courseStudents.length} enrolled</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <div className="relative flex-1 min-w-[160px]">
+                        <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Search name or matric…"
+                          value={attendanceStudentSearch}
+                          onChange={(e) => setAttendanceStudentSearch(e.target.value)}
+                          className="w-full border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                        />
+                      </div>
+                      <select value={attendanceStudentSort} onChange={(e) => setAttendanceStudentSort(e.target.value)} className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs bg-white">
+                        <option value="name">Sort: Name</option>
+                        <option value="matric">Sort: Matric</option>
+                        <option value="status">Sort: Status</option>
+                      </select>
+                      <select value={attendanceStudentFilter} onChange={(e) => setAttendanceStudentFilter(e.target.value)} className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs bg-white">
+                        <option value="all">All</option>
+                        <option value="present">Present</option>
+                        <option value="absent">Absent</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto">
+                    {courseStudents.length === 0 ? (
+                      <p className="text-sm text-slate-400 text-center py-8 px-4">No students enrolled in this course yet.</p>
+                    ) : (() => {
+                      const presentMap = new Map(attendanceRoster.map((r) => [Number(r.student_id), Boolean(r.present)]))
+                      const q = attendanceStudentSearch.trim().toLowerCase()
+                      let visible = [...courseStudents]
+                      if (q) {
+                        visible = visible.filter((s) => (s.full_name || '').toLowerCase().includes(q) || (s.matric_no || '').toLowerCase().includes(q) || (s.email || '').toLowerCase().includes(q))
+                      }
+                      if (attendanceStudentFilter !== 'all') {
+                        visible = visible.filter((s) => {
+                          const isPresent = presentMap.get(Number(s.student_id)) || false
+                          return attendanceStudentFilter === 'present' ? isPresent : !isPresent
+                        })
+                      }
+                      if (attendanceStudentSort === 'name') visible.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''))
+                      else if (attendanceStudentSort === 'matric') visible.sort((a, b) => (a.matric_no || '').localeCompare(b.matric_no || ''))
+                      else if (attendanceStudentSort === 'status') visible.sort((a, b) => (a.status || '').localeCompare(b.status || '') || (a.full_name || '').localeCompare(b.full_name || ''))
+                      const presentCount = courseStudents.filter((s) => presentMap.get(Number(s.student_id))).length
+                      const absentCount = courseStudents.length - presentCount
+                      return (
+                        <>
+                          <div className="sticky top-0 bg-slate-50 border-b border-slate-100 px-4 py-2 flex gap-3 text-xs font-medium text-slate-500">
+                            <span className="text-emerald-700">{presentCount} present</span>
+                            <span>·</span>
+                            <span className="text-red-600">{absentCount} absent</span>
+                            <span>·</span>
+                            <span>{visible.length} shown</span>
+                          </div>
+                          <ul className="divide-y divide-slate-100">
+                            {visible.map((s) => {
+                              const isPresent = presentMap.get(Number(s.student_id)) || false
+                              const canMark = Boolean(attendanceStatus.activeSession)
+                              return (
+                                <li key={s.student_id} className={`flex items-center justify-between gap-3 px-4 py-2.5 hover:bg-slate-50 transition-colors ${isPresent ? 'bg-emerald-50/40' : ''}`}>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-sm font-medium text-slate-900 truncate">{s.full_name}</p>
+                                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                                      {s.matric_no ? <span className="text-xs font-mono text-slate-500 bg-slate-100 rounded px-1.5 py-0.5">{s.matric_no}</span> : null}
+                                      {s.status ? <span className={`text-[10px] font-semibold rounded-full px-2 py-0.5 ${STATUS_COLORS[s.status] || 'bg-slate-100 text-slate-600'}`}>{s.status}</span> : null}
+                                      <span className={`text-[10px] font-semibold rounded-full px-2 py-0.5 ${isPresent ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>{isPresent ? 'Present' : 'Absent'}</span>
+                                      {(s.marked_by === 'lms_join' || (attendanceStatus.isLive && isPresent)) && (
+                                        <span className="text-[10px] font-semibold rounded-full px-2 py-0.5 bg-[#EEF2FF] text-[#4338CA] border border-[#C7D2FE]">LMS ✓</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => markStudentPresent(s.student_id)}
+                                    disabled={!canMark || isPresent}
+                                    className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors ${isPresent ? 'bg-emerald-100 border-emerald-200 text-emerald-700 cursor-default' : canMark ? 'bg-white border-slate-200 text-slate-700 hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-700' : 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'}`}
+                                    title={canMark ? (isPresent ? 'Already present' : 'Mark present') : 'Start attendance to mark'}
+                                  >
+                                    {isPresent ? 'Present ✓' : canMark ? 'Mark present' : '—'}
+                                  </button>
+                                </li>
+                              )
+                            })}
+                          </ul>
+                          {visible.length === 0 ? <p className="text-xs text-slate-400 text-center py-6">No students match filters.</p> : null}
+                        </>
+                      )
+                    })()}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="shrink-0 px-6 py-4 border-t border-slate-100 bg-white flex justify-end gap-2">
+              <button type="button" onClick={() => setShowAddAttendance(false)} className="px-4 py-2 text-sm rounded-lg bg-slate-100 hover:bg-slate-200">Close</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Live Classes drawer ─────────────────────────────────────── */}
+      {showLiveClassDrawer ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setShowLiveClassDrawer(false)}>
+          <div className="bg-white rounded-[24px] shadow-2xl max-w-3xl w-full max-h-[85vh] flex flex-col overflow-hidden isolate" onClick={(e) => e.stopPropagation()}>
+            <div className="shrink-0 px-6 py-4 border-b border-slate-100 bg-white flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-slate-900">Live Classes</h3>
+                <p className="text-sm text-slate-500 mt-0.5">{selectedCourse ? selectedCourse.title : 'Select a course'}</p>
+              </div>
+              <button type="button" onClick={() => setShowLiveClassDrawer(false)} className="rounded-lg p-1 hover:bg-slate-100">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4">
+              {!selectedCourseId ? (
+                <p className="text-sm text-slate-500 py-6 text-center">Select a course first.</p>
+              ) : (
+                <>
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-900">Start Live Class</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Class {selectedClassNumber} · mode, window and Zoom (for online) can be pre-filled from the schedule below.</p>
+                      </div>
+                      {attendanceStatus.activeSession ? (
+                        <Badge tone="slate" dot className={attendanceStatus.isLive ? '!bg-emerald-100 !text-emerald-700 !border-emerald-200' : '!bg-amber-100 !text-amber-800 !border-amber-200'}>
+                          {attendanceStatus.isLive ? 'LIVE' : 'Active'}
+                        </Badge>
+                      ) : null}
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                      <label className="text-xs text-slate-600 block">
+                        <span className="flex justify-between"><span>Class number</span><span className="text-slate-400">1–6</span></span>
+                        <select className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={selectedClassNumber} onChange={(e) => setSelectedClassNumber(e.target.value)}>
+                          {[1,2,3,4,5,6].map((n) => <option key={n} value={String(n)}>Class {n}</option>)}
+                        </select>
+                      </label>
+                      <label className="text-xs text-slate-600 block">
+                        <span className="flex justify-between"><span>Class type</span><span className="text-slate-400">per class</span></span>
+                        <select className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={liveClassMode} onChange={(e) => setLiveClassMode(e.target.value)}>
+                          <option value="online">Online (Zoom)</option>
+                          <option value="physical">Physical (no link)</option>
+                        </select>
+                      </label>
+                      <div className="flex items-end">
+                        <button type="button" onClick={() => prefillLiveFormFromSchedule(selectedClassNumber)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                          Load from schedule
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {liveClassMode === 'online' ? (
+                        <label className="text-xs text-slate-600 block">
+                          <span className="flex justify-between"><span>Zoom Meeting Number</span><span className="text-slate-400">required</span></span>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2"
+                            value={liveMeetingNumber}
+                            onChange={(e) => setLiveMeetingNumber(e.target.value.replace(/\D/g, ''))}
+                            placeholder="4579798335"
+                          />
+                        </label>
+                      ) : null}
+                      {liveClassMode === 'online' ? (
+                        <label className="text-xs text-slate-600 block">
+                          <span className="flex justify-between"><span>Zoom Passcode</span><span className="text-slate-400">optional</span></span>
+                          <input
+                            type="text"
+                            className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2"
+                            value={livePasscode}
+                            onChange={(e) => setLivePasscode(e.target.value)}
+                            placeholder="4XRBA0"
+                          />
+                        </label>
+                      ) : null}
+                      <label className="text-xs text-slate-600 block">
+                        Start (window)
+                        <input type="datetime-local" className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={liveClassStart} onChange={(e) => setLiveClassStart(e.target.value)} />
+                      </label>
+                      <label className="text-xs text-slate-600 block">
+                        End (window)
+                        <input type="datetime-local" className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2" value={liveClassEnd} onChange={(e) => setLiveClassEnd(e.target.value)} />
+                      </label>
+                    </div>
+
+                    <div className="mt-3 flex gap-2">
+                      <button type="button" onClick={() => setLiveClassEnd((prev) => (prev ? prev : new Date(new Date(liveClassStart || new Date()).getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 16)))} className="text-xs rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-slate-700 hover:bg-slate-50">Suggest end +3h</button>
+                      <button
+                        type="button"
+                        onClick={startAttendance}
+                        disabled={Boolean(attendanceStatus.activeSession) || !selectedCourseId}
+                        className={`flex-1 btn btn-primary text-xs py-1.5 disabled:opacity-50 ${attendanceStatus.isLive ? 'bg-amber-600 hover:bg-amber-700' : ''}`}
+                      >
+                        {attendanceStatus.isLive ? 'Already Live' : `Start Class ${selectedClassNumber}`}
+                      </button>
+                    </div>
+
+                    {attendanceStatus.activeSession ? (
+                      <div className="mt-3 rounded-xl bg-white border border-slate-200 px-3 py-3 text-sm text-slate-600 space-y-1">
+                        <p>Class: {attendanceStatus.classNumber || attendanceStatus.activeSession?.class_number || selectedClassNumber}</p>
+                        <p>Mode: {attendanceStatus.mode || attendanceStatus.activeSession?.class_mode || '—'}</p>
+                        <p>Window: {attendanceStatus.startTime ? new Date(attendanceStatus.startTime).toLocaleString() : '—'} – {attendanceStatus.endTime ? new Date(attendanceStatus.endTime).toLocaleString() : '—'}</p>
+                        <p>LMS present: {attendanceStatus.lmsPresent}</p>
+                        {(attendanceStatus.mode || attendanceStatus.activeSession?.class_mode) === 'online' ? (
+                          <>
+                            <p className="font-mono">Meeting: {attendanceStatus.zoomMeetingNumber || '—'}</p>
+                            <p className="font-mono">Passcode: {attendanceStatus.zoomPasscode || '—'}</p>
+                          </>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <div className="flex items-center justify-between gap-2 mb-3">
+                      <div>
+                        <p className="font-semibold text-slate-900">Class calendar (1–6)</p>
+                        <p className="text-xs text-slate-500 mt-0.5">Pre-schedule each class: set mode, date/time window, and Zoom details (online). Times can be changed later.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={saveLiveClassSchedule}
+                        disabled={liveScheduleSaving}
+                        className="btn btn-primary btn-sm disabled:opacity-50"
+                      >
+                        {liveScheduleSaving ? 'Saving…' : 'Save schedule'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {(liveClassSchedule.length ? liveClassSchedule : buildDefaultLiveSchedule()).map((item) => {
+                        const n = Number(item.class_number)
+                        const isOnline = (item.class_mode || 'physical') === 'online'
+                        return (
+                          <div key={n} className="rounded-xl border border-slate-200 p-3">
+                            <div className="flex items-center justify-between gap-2 mb-2">
+                              <p className="text-sm font-semibold text-slate-900">Class {n}</p>
+                              <div className="flex items-center gap-2">
+                                <select
+                                  className="border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs"
+                                  value={item.class_mode || 'online'}
+                                  onChange={(e) => updateLiveScheduleItem(n, { class_mode: e.target.value })}
+                                >
+                                  <option value="online">Online</option>
+                                  <option value="physical">Physical</option>
+                                </select>
+                                <button
+                                  type="button"
+                                  onClick={() => { setSelectedClassNumber(String(n)); prefillLiveFormFromSchedule(n) }}
+                                  className="text-xs rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 hover:bg-slate-100"
+                                >
+                                  Use for start
+                                </button>
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                              <label className="text-xs text-slate-600 block">
+                                Start
+                                <input
+                                  type="datetime-local"
+                                  className="mt-1 w-full border border-slate-300 rounded-lg px-2.5 py-1.5"
+                                  value={item.start_at || ''}
+                                  onChange={(e) => updateLiveScheduleItem(n, { start_at: e.target.value })}
+                                />
+                              </label>
+                              <label className="text-xs text-slate-600 block">
+                                End
+                                <input
+                                  type="datetime-local"
+                                  className="mt-1 w-full border border-slate-300 rounded-lg px-2.5 py-1.5"
+                                  value={item.end_at || ''}
+                                  onChange={(e) => updateLiveScheduleItem(n, { end_at: e.target.value })}
+                                />
+                              </label>
+                              {isOnline ? (
+                                <label className="text-xs text-slate-600 block">
+                                  Zoom Meeting Number
+                                  <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    className="mt-1 w-full border border-slate-300 rounded-lg px-2.5 py-1.5"
+                                    value={item.zoom_meeting_number || ''}
+                                    onChange={(e) => updateLiveScheduleItem(n, { zoom_meeting_number: e.target.value.replace(/\D/g, '') })}
+                                    placeholder="4579798335"
+                                  />
+                                </label>
+                              ) : null}
+                              {isOnline ? (
+                                <label className="text-xs text-slate-600 block">
+                                  Zoom Passcode
+                                  <input
+                                    type="text"
+                                    className="mt-1 w-full border border-slate-300 rounded-lg px-2.5 py-1.5"
+                                    value={item.zoom_passcode || ''}
+                                    onChange={(e) => updateLiveScheduleItem(n, { zoom_passcode: e.target.value })}
+                                    placeholder="4XRBA0"
+                                  />
+                                </label>
+                              ) : (
+                                <div className="text-xs text-slate-500 flex items-end pb-2">Physical class — no Zoom link needed.</div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="shrink-0 px-6 py-4 border-t border-slate-100 bg-white flex justify-end">
+              <button type="button" onClick={() => setShowLiveClassDrawer(false)} className="rounded-lg px-4 py-2 text-sm bg-slate-100 hover:bg-slate-200">Done</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Attendance History drawer ───────────────────────────────── */}
+      {showAttendanceHistory ? (
+        <div className="fixed inset-0 z-50 flex justify-end" onClick={() => setShowAttendanceHistory(false)}>
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" />
+          <div className="relative bg-white w-[420px] max-w-[92vw] h-full shadow-2xl flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="shrink-0 px-5 py-4 border-b border-slate-100 bg-white flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-slate-900">Attendance History</h3>
+                <p className="text-xs text-slate-500 mt-0.5">{attendanceHistory.length} session(s)</p>
+              </div>
+              <button type="button" onClick={() => setShowAttendanceHistory(false)} className="rounded-lg p-1 hover:bg-slate-100">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-2">
+              {attendanceHistory.length === 0 ? (
+                <p className="text-sm text-slate-400 text-center py-8">No attendance sessions yet.</p>
+              ) : (
+                attendanceHistory.map((session) => (
+                  <div key={session.id} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-slate-900">Class {session.class_number}</p>
+                      <p className="text-xs text-slate-500">{new Date(session.start_time).toLocaleString()}</p>
+                      <p className="text-xs text-slate-500">{session.attendees} present</p>
+                    </div>
+                    <button type="button" onClick={() => openEditSession(session)} className="shrink-0 rounded-lg px-3 py-1.5 bg-white border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-100">
+                      Edit
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+       </div>
+      {dialogHost}
+     </AppShell>
+   )
+ }
+
+export default LecturerDashboard
+
+const FIELD_TYPES = [
+  { value: 'text', label: 'Short Text' },
+  { value: 'textarea', label: 'Long Text' },
+  { value: 'number', label: 'Number' },
+  { value: 'email', label: 'Email' },
+  { value: 'phone', label: 'Phone' },
+  { value: 'date', label: 'Date' },
+  { value: 'select', label: 'Dropdown' },
+  { value: 'multiselect', label: 'Multi-Select' },
+  { value: 'radio', label: 'Radio Buttons' },
+  { value: 'checkbox', label: 'Checkbox' },
+  { value: 'graduate_select', label: 'Graduate Student (dropdown)' },
+  { value: 'availability', label: 'Availability / Calendar slots' },
+]
+
+const GRADUATION_CALENDAR_TEMPLATE = {
+  title: 'Graduation Calendar — Rector Meeting',
+  slug: 'graduation-calendar',
+  description: 'Select your name and book a unique time slot to meet with the Rector.',
+  status: 'draft',
+  mapsToStudent: false,
+  fields: [
+    {
+      fieldType: 'graduate_select',
+      label: 'Graduate name',
+      placeholder: 'Select your name',
+      required: true,
+      options: [],
+      validation: {},
+      section: 'Student',
+      width: 'full',
+      fieldConditions: null,
+      mapsToColumn: '',
+    },
+    {
+      fieldType: 'email',
+      label: 'Email',
+      placeholder: 'Your email',
+      required: true,
+      options: [],
+      validation: {},
+      section: 'Student',
+      width: 'half',
+      fieldConditions: null,
+      mapsToColumn: '',
+    },
+    {
+      fieldType: 'phone',
+      label: 'Phone',
+      placeholder: 'Your phone number',
+      required: false,
+      options: [],
+      validation: {},
+      section: 'Student',
+      width: 'half',
+      fieldConditions: null,
+      mapsToColumn: '',
+    },
+    {
+      fieldType: 'availability',
+      label: 'Meeting date & time',
+      placeholder: '',
+      required: true,
+      options: [
+        {
+          value: '__recurring__',
+          label: 'Rector meeting slot',
+          recurring: {
+            weekdays: [1, 2, 3, 4, 5],
+            startTime: '09:00',
+            endTime: '16:00',
+            slotMinutes: 30,
+            capacity: 1,
+            weeksAhead: 4,
+          },
+        },
+      ],
+      validation: {},
+      section: 'Booking',
+      width: 'full',
+      fieldConditions: null,
+      mapsToColumn: '',
+    },
+    {
+      fieldType: 'textarea',
+      label: 'Notes for the Rector (optional)',
+      placeholder: 'Anything you would like to discuss…',
+      required: false,
+      options: [],
+      validation: {},
+      section: 'Booking',
+      width: 'full',
+      fieldConditions: null,
+      mapsToColumn: '',
+    },
+  ],
+}
+
+function FormBuilderDrawer({ form, onClose, onSave }) {
+  const [title, setTitle] = useState(form?.title || '')
+  const [slug, setSlug] = useState(form?.slug || '')
+  const [description, setDescription] = useState(form?.description || '')
+  const [status, setStatus] = useState(form?.status || 'draft')
+  const [mapsToStudent, setMapsToStudent] = useState(form?.maps_to_student || false)
+  const [cohortId, setCohortId] = useState(form?.cohort_id || '')
+  const [cohorts, setCohorts] = useState([])
+  const [showCreateCohort, setShowCreateCohort] = useState(false)
+  const [newCohort, setNewCohort] = useState({ name: '', startDate: '', endDate: '' })
+  const [fields, setFields] = useState(
+    form?.fields?.map((f) => ({
+      id: f.id,
+      fieldType: f.field_type || f.fieldType,
+      label: f.label,
+      placeholder: f.placeholder || '',
+      required: f.required || false,
+      options: f.options || [],
+      validation: f.validation || {},
+      section: f.section || '',
+      width: f.width || 'full',
+      fieldConditions: f.field_conditions || f.fieldConditions || null,
+      mapsToColumn: f.maps_to_column || f.mapsToColumn || '',
+    })) || []
+  )
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    apiClient.get('/cohorts').then(res => setCohorts(res.data)).catch(() => {})
+  }, [])
+
+  // Keep local form state in sync when the `form` prop changes (e.g., after fetching full form by id)
+  // This handles the case where listForms previously lacked fields and we now open with a freshly fetched form.
+  useEffect(() => {
+    setTitle(form?.title || '')
+    setSlug(form?.slug || '')
+    setDescription(form?.description || '')
+    setStatus(form?.status || 'draft')
+    setMapsToStudent(form?.maps_to_student || false)
+    setCohortId(form?.cohort_id || '')
+    setFields(
+      form?.fields?.map((f) => ({
+        id: f.id,
+        fieldType: f.field_type || f.fieldType,
+        label: f.label,
+        placeholder: f.placeholder || '',
+        required: f.required || false,
+        options: f.options || [],
+        validation: f.validation || {},
+        section: f.section || '',
+        width: f.width || 'full',
+        fieldConditions: f.field_conditions || f.fieldConditions || null,
+        mapsToColumn: f.maps_to_column || f.mapsToColumn || '',
+      })) || []
+    )
+  }, [form?.id])
+
+  useEffect(() => {
+    if (!mapsToStudent) return
+    setFields(prev => {
+      const hasName = prev.some(f => f.mapsToColumn === 'full_name')
+      const hasEmail = prev.some(f => f.mapsToColumn === 'email')
+      const hasPhone = prev.some(f => f.mapsToColumn === 'phone')
+      if (hasName && hasEmail && hasPhone) return prev
+      const autoFields = []
+      if (!hasName) autoFields.push({ fieldType: 'text', label: 'Full Name', placeholder: 'Enter your full name', required: true, options: [], validation: {}, section: '', width: 'full', fieldConditions: null, mapsToColumn: 'full_name' })
+      if (!hasEmail) autoFields.push({ fieldType: 'email', label: 'Email', placeholder: 'Enter your email', required: true, options: [], validation: {}, section: '', width: 'half', fieldConditions: null, mapsToColumn: 'email' })
+      if (!hasPhone) autoFields.push({ fieldType: 'phone', label: 'Phone Number', placeholder: 'Enter your phone number', required: true, options: [], validation: {}, section: '', width: 'half', fieldConditions: null, mapsToColumn: 'phone' })
+      return [...autoFields, ...prev]
+    })
+  }, [mapsToStudent])
+
+  const addField = () => {
+    setFields((prev) => [
+      ...prev,
+      { fieldType: 'text', label: '', placeholder: '', required: false, options: [], validation: {}, section: '', width: 'full', fieldConditions: null, mapsToColumn: '' },
+    ])
+  }
+
+  const removeField = (index) => {
+    setFields((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const moveFieldUp = (index) => {
+    if (index === 0) return
+    setFields((prev) => {
+      const next = [...prev]
+      const temp = next[index - 1]
+      next[index - 1] = next[index]
+      next[index] = temp
+      return next
+    })
+  }
+
+  const moveFieldDown = (index) => {
+    setFields((prev) => {
+      if (index >= prev.length - 1) return prev
+      const next = [...prev]
+      const temp = next[index + 1]
+      next[index + 1] = next[index]
+      next[index] = temp
+      return next
+    })
+  }
+
+  const handleCreateCohort = async (e) => {
+    e.preventDefault()
+    if (!newCohort.name) return
+    try {
+      const res = await apiClient.post('/cohorts', newCohort)
+      setCohorts(prev => [...prev, res.data])
+      setCohortId(String(res.data.id))
+      setShowCreateCohort(false)
+      setNewCohort({ name: '', startDate: '', endDate: '' })
+    } catch (err) {
+      alert(err?.response?.data?.message || 'Failed to create student batch')
+    }
+  }
+
+  const updateField = (index, updates) => {
+    setFields((prev) => prev.map((f, i) => (i === index ? { ...f, ...updates } : f)))
+  }
+
+  const addOption = (fieldIndex) => {
+    setFields((prev) =>
+      prev.map((f, i) =>
+        i === fieldIndex ? { ...f, options: [...f.options, { label: '', value: '' }] } : f
+      )
+    )
+  }
+
+  const getRecurring = (field) => (field?.options || []).find((o) => o && o.recurring) || null
+
+  const updateRecurring = (fieldIndex, updates) => {
+    setFields((prev) =>
+      prev.map((f, i) => {
+        if (i !== fieldIndex) return f
+        const existing = (f.options || []).find((o) => o && o.recurring)
+        const rest = (f.options || []).filter((o) => !o || !o.recurring)
+        const base = existing || { value: '__recurring__', label: '', recurring: { weekdays: [3], startTime: '09:00', endTime: '17:00', slotMinutes: 60, capacity: 1, weeksAhead: 4 } }
+        const next = { ...base, recurring: { ...base.recurring, ...updates } }
+        return { ...f, options: [...rest, next] }
+      })
+    )
+  }
+
+  const updateRecurringMeta = (fieldIndex, updates) => {
+    setFields((prev) =>
+      prev.map((f, i) => {
+        if (i !== fieldIndex) return f
+        const existing = (f.options || []).find((o) => o && o.recurring)
+        if (!existing) return f
+        const rest = (f.options || []).filter((o) => !o || !o.recurring)
+        return { ...f, options: [...rest, { ...existing, ...updates }] }
+      })
+    )
+  }
+
+  const addSlot = (fieldIndex) => {
+    setFields((prev) =>
+      prev.map((f, i) => {
+        if (i !== fieldIndex) return f
+        const idx = f.options?.length || 0
+        return { ...f, options: [...f.options, { label: '', value: `slot_${idx + 1}`, date: '', start: '', end: '', capacity: 1 }] }
+      })
+    )
+  }
+
+  const updateOption = (fieldIndex, optIndex, updates) => {
+    setFields((prev) =>
+      prev.map((f, i) =>
+        i === fieldIndex
+          ? {
+              ...f,
+              options: f.options.map((o, j) => (j === optIndex ? { ...o, ...updates } : o)),
+            }
+          : f
+      )
+    )
+  }
+
+  const removeOption = (fieldIndex, optIndex) => {
+    setFields((prev) =>
+      prev.map((f, i) =>
+        i === fieldIndex ? { ...f, options: f.options.filter((_, j) => j !== optIndex) } : f
+      )
+    )
+  }
+
+  const removeRecurring = (fieldIndex) => {
+    setFields((prev) =>
+      prev.map((f, i) => (i === fieldIndex ? { ...f, options: (f.options || []).filter((o) => !o || !o.recurring) } : f))
+    )
+  }
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    if (!title.trim() || !slug.trim()) return
+    setSaving(true)
+    try {
+      await onSave({
+        title: title.trim(),
+        slug: slug.trim(),
+        description: description.trim(),
+        status,
+        mapsToStudent,
+        cohortId: cohortId ? Number(cohortId) : null,
+        fields: fields.map((f) => ({
+          fieldType: f.fieldType,
+          label: f.label,
+          placeholder: f.placeholder,
+          required: f.required,
+          options: f.options,
+          validation: f.validation,
+          section: f.section,
+          width: f.width,
+          fieldConditions: f.fieldConditions,
+          mapsToColumn: f.mapsToColumn || null,
+        })),
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const isGradCal = form?._template === 'graduation_calendar' || form?.slug === 'graduation-calendar'
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30 backdrop-blur-sm">
+      <div className={`bg-white h-full overflow-y-auto shadow-2xl ${isGradCal ? 'w-[420px] max-w-[92vw]' : 'w-full max-w-3xl'}`}>
+        <div className="sticky top-0 bg-white border-b border-slate-200 px-5 py-4 flex items-center justify-between">
+          <h3 className="font-semibold text-slate-900">{form ? 'Edit Form' : 'Create Form'}</h3>
+          <button type="button" onClick={onClose} className="rounded-lg p-1 hover:bg-slate-100">
+            <X size={18} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-6">
+          {/* Basic info */}
+          <div className="space-y-3">
+            <label className="text-sm text-slate-600 block">
+              Title *
+              <input
+                className="mt-1 w-full border rounded-lg px-3 py-2"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                required
+              />
+            </label>
+            <label className="text-sm text-slate-600 block">
+              Slug *
+              <input
+                className="mt-1 w-full border rounded-lg px-3 py-2"
+                value={slug}
+                onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, ''))}
+                placeholder="e.g. student-application"
+                required
+              />
+            </label>
+            <label className="text-sm text-slate-600 block">
+              Description
+              <textarea
+                className="mt-1 w-full border rounded-lg px-3 py-2"
+                rows={2}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+            </label>
+            <label className="text-sm text-slate-600 block">
+              Status
+              <select
+                className="mt-1 w-full border rounded-lg px-3 py-2"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
+                <option value="draft">Draft</option>
+                <option value="active">Active</option>
+                <option value="closed">Closed</option>
+              </select>
+            </label>
+            {/* Form type presets */}
+            <div className="pt-2 space-y-2">
+              <p className="text-sm font-medium text-slate-700">Form type</p>
+              <label className="flex items-start gap-3 text-sm text-slate-700 cursor-pointer rounded-xl border border-slate-200 px-3 py-2.5 hover:bg-slate-50">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4 rounded mt-0.5"
+                  checked={mapsToStudent}
+                  onChange={(e) => {
+                    setMapsToStudent(e.target.checked)
+                    if (e.target.checked && form?._template === 'graduation_calendar') {
+                      // switching away from graduation template flag when marking as student app
+                    }
+                  }}
+                />
+                <span>
+                  <span className="font-medium block">Student Application Form</span>
+                  <span className="text-xs text-slate-400">Auto-creates a student record on approval</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3 text-sm text-slate-700 cursor-pointer rounded-xl border border-slate-200 px-3 py-2.5 hover:bg-slate-50">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4 rounded mt-0.5"
+                  checked={!!(form?._template === 'graduation_calendar' || fields.some((f) => f.fieldType === 'graduate_select' || f.fieldType === 'availability'))}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setMapsToStudent(false)
+                      setTitle((t) => t || GRADUATION_CALENDAR_TEMPLATE.title)
+                      setSlug((s) => s || GRADUATION_CALENDAR_TEMPLATE.slug)
+                      setDescription((d) => d || GRADUATION_CALENDAR_TEMPLATE.description)
+                      setFields((prev) => {
+                        if (prev.some((f) => f.fieldType === 'graduate_select' || f.fieldType === 'availability')) return prev
+                        return GRADUATION_CALENDAR_TEMPLATE.fields.map((f) => ({ ...f }))
+                      })
+                    } else {
+                      setFields((prev) => prev.filter((f) => f.fieldType !== 'graduate_select' && f.fieldType !== 'availability'))
+                    }
+                  }}
+                />
+                <span>
+                  <span className="font-medium block">Graduation Calendar Form</span>
+                  <span className="text-xs text-slate-400">Graduate dropdown + unique date/time booking slots</span>
+                </span>
+              </label>
+            </div>
+            {mapsToStudent && (
+              <div className="pl-7 space-y-3">
+                <label className="text-sm text-slate-600 block">
+                  Target Cohort (Student Batch) *
+                  <select
+                    className="mt-1 w-full border rounded-lg px-3 py-2"
+                    value={cohortId}
+                    onChange={(e) => {
+                      if (e.target.value === '__new__') {
+                        setShowCreateCohort(true)
+                      } else {
+                        setCohortId(e.target.value)
+                      }
+                    }}
+                    required={mapsToStudent}
+                  >
+                    <option value="">Select a cohort...</option>
+                    {cohorts.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}{c.start_date ? ` (${new Date(c.start_date).toLocaleDateString()})` : ''}
+                      </option>
+                    ))}
+                    <option value="__new__">+ Create New Cohort</option>
+                  </select>
+                </label>
+                <p className="text-xs text-slate-400">
+                  Map field columns below in each field's settings to define which submission data creates the student record.
+                </p>
+              </div>
+            )}
+
+            {/* Create Cohort Modal */}
+            {showCreateCohort && (
+              <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+                  <h3 className="font-semibold text-slate-900 mb-4">Create New Cohort (Student Batch)</h3>
+                  <div className="space-y-3">
+                    <label className="text-sm text-slate-600 block">
+                      Name *
+                      <input
+                        className="mt-1 w-full border rounded-lg px-3 py-2"
+                        value={newCohort.name}
+                        onChange={(e) => setNewCohort(p => ({ ...p, name: e.target.value }))}
+                        placeholder="e.g. 2026 Fall Intake"
+                        required
+                      />
+                    </label>
+                    <label className="text-sm text-slate-600 block">
+                      Start Date
+                      <input
+                        type="date"
+                        className="mt-1 w-full border rounded-lg px-3 py-2"
+                        value={newCohort.startDate}
+                        onChange={(e) => setNewCohort(p => ({ ...p, startDate: e.target.value }))}
+                      />
+                    </label>
+                    <label className="text-sm text-slate-600 block">
+                      End Date
+                      <input
+                        type="date"
+                        className="mt-1 w-full border rounded-lg px-3 py-2"
+                        value={newCohort.endDate}
+                        onChange={(e) => setNewCohort(p => ({ ...p, endDate: e.target.value }))}
+                      />
+                    </label>
+                  </div>
+                  <div className="flex gap-3 mt-6">
+                    <button
+                      type="button"
+                      onClick={handleCreateCohort}
+                      className="btn btn-primary rounded-xl px-6 py-2 text-sm"
+                    >
+                      Create
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowCreateCohort(false)}
+                      className="bg-slate-100 text-slate-700 rounded-xl px-6 py-2 text-sm"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Fields */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="font-medium text-slate-900">Fields ({fields.length})</h4>
+              <button type="button" onClick={addField} className="text-sm btn btn-primary px-3 py-1.5">
+                Add Field
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {fields.map((field, idx) => (
+                <div key={idx} className="border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1">
+                      <button type="button" onClick={() => moveFieldUp(idx)} disabled={idx === 0} className="text-xs text-slate-400 hover:text-slate-700 disabled:opacity-30" title="Move up">▲</button>
+                      <button type="button" onClick={() => moveFieldDown(idx)} disabled={idx >= fields.length - 1} className="text-xs text-slate-400 hover:text-slate-700 disabled:opacity-30" title="Move down">▼</button>
+                      <span className="text-xs font-medium text-slate-500 ml-1">Field #{idx + 1}</span>
+                    </div>
+                    <button type="button" onClick={() => removeField(idx)} className="text-xs text-red-500 hover:underline">
+                      Remove
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm text-slate-600 block">
+                      Type
+                      <select
+                        className="mt-1 w-full border rounded-lg px-3 py-2"
+                        value={field.fieldType}
+                        onChange={(e) => updateField(idx, { fieldType: e.target.value })}
+                      >
+                        {FIELD_TYPES.map((t) => (
+                          <option key={t.value} value={t.value}>{t.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="text-sm text-slate-600 block">
+                      Width
+                      <select
+                        className="mt-1 w-full border rounded-lg px-3 py-2"
+                        value={field.width}
+                        onChange={(e) => updateField(idx, { width: e.target.value })}
+                      >
+                        <option value="full">Full Width</option>
+                        <option value="half">Half Width</option>
+                        <option value="third">Third Width</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm text-slate-600 block">
+                      Section (optional)
+                      <input
+                        className="mt-1 w-full border rounded-lg px-3 py-2"
+                        value={field.section}
+                        onChange={(e) => updateField(idx, { section: e.target.value })}
+                        placeholder="e.g. Personal Info"
+                      />
+                    </label>
+                    {mapsToStudent && (
+                      <label className="text-sm text-slate-600 block">
+                        Maps to student column
+                        <select
+                          className="mt-1 w-full border rounded-lg px-3 py-2"
+                          value={field.mapsToColumn}
+                          onChange={(e) => updateField(idx, { mapsToColumn: e.target.value })}
+                        >
+                          <option value="">-- Not mapped --</option>
+                          <option value="full_name">Full Name</option>
+                          <option value="email">Email</option>
+                          <option value="phone">Phone</option>
+                          <option value="comments">Comments</option>
+                        </select>
+                      </label>
+                    )}
+                  </div>
+
+                  <label className="text-sm text-slate-600 block">
+                    Label *
+                    <input
+                      className="mt-1 w-full border rounded-lg px-3 py-2"
+                      value={field.label}
+                      onChange={(e) => updateField(idx, { label: e.target.value })}
+                      required
+                    />
+                  </label>
+
+                  <label className="text-sm text-slate-600 block">
+                    Placeholder
+                    <input
+                      className="mt-1 w-full border rounded-lg px-3 py-2"
+                      value={field.placeholder}
+                      onChange={(e) => updateField(idx, { placeholder: e.target.value })}
+                    />
+                  </label>
+
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 rounded"
+                        checked={field.required}
+                        onChange={(e) => updateField(idx, { required: e.target.checked })}
+                      />
+                      Required
+                    </label>
+                  </div>
+
+                  {/* Conditional visibility */}
+                  <details className="text-sm">
+                    <summary className="cursor-pointer text-slate-500 hover:text-slate-700 font-medium">
+                      Conditional visibility
+                    </summary>
+                    <div className="mt-2 space-y-2 border border-slate-200 rounded-lg p-3 bg-slate-50">
+                      {field.fieldConditions ? (
+                        <>
+                          <label className="text-sm text-slate-600 block">
+                            Show when field
+                            <select
+                              className="mt-1 w-full border rounded-lg px-3 py-2"
+                              value={field.fieldConditions.fieldId || ''}
+                              onChange={(e) => {
+                                const cond = { ...field.fieldConditions, fieldId: Number(e.target.value) }
+                                updateField(idx, { fieldConditions: cond })
+                              }}
+                            >
+                              <option value="">Select a field...</option>
+                              {fields.filter((_, i) => i !== idx).map((f, i) => (
+                                <option key={i} value={f.id || `_idx_${i}`}>
+                                  {f.label || `Field #${i + 1}`}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="text-sm text-slate-600 block">
+                            Operator
+                            <select
+                              className="mt-1 w-full border rounded-lg px-3 py-2"
+                              value={field.fieldConditions.operator || 'equals'}
+                              onChange={(e) => {
+                                const cond = { ...field.fieldConditions, operator: e.target.value }
+                                updateField(idx, { fieldConditions: cond })
+                              }}
+                            >
+                              <option value="equals">equals</option>
+                              <option value="not_equals">not equals</option>
+                              <option value="contains">contains</option>
+                              <option value="is_checked">is checked</option>
+                            </select>
+                          </label>
+                          <label className="text-sm text-slate-600 block">
+                            Value
+                            <input
+                              className="mt-1 w-full border rounded-lg px-3 py-2"
+                              value={field.fieldConditions.value || ''}
+                              onChange={(e) => {
+                                const cond = { ...field.fieldConditions, value: e.target.value }
+                                updateField(idx, { fieldConditions: cond })
+                              }}
+                              placeholder="Value to match"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => updateField(idx, { fieldConditions: null })}
+                            className="text-xs text-red-500 hover:underline"
+                          >
+                            Remove condition
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => updateField(idx, { fieldConditions: { fieldId: '', operator: 'equals', value: '' } })}
+                          className="text-xs text-sky-600 hover:underline"
+                        >
+                          + Add condition
+                        </button>
+                      )}
+                    </div>
+                  </details>
+
+                  {/* Options for select/multiselect/radio/checkbox */}
+                  {['select', 'multiselect', 'radio', 'checkbox'].includes(field.fieldType) && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium text-slate-700">Options</span>
+                        <button type="button" onClick={() => addOption(idx)} className="text-xs text-sky-600 hover:underline">
+                          + Add Option
+                        </button>
+                      </div>
+                      {field.options.map((opt, optIdx) => (
+                        <div key={optIdx} className="flex items-center gap-2">
+                          <input
+                            className="flex-1 border rounded-lg px-3 py-1.5 text-sm"
+                            placeholder="Label"
+                            value={opt.label}
+                            onChange={(e) => updateOption(idx, optIdx, { label: e.target.value })}
+                          />
+                          <input
+                            className="flex-1 border rounded-lg px-3 py-1.5 text-sm"
+                            placeholder="Value"
+                            value={opt.value}
+                            onChange={(e) => updateOption(idx, optIdx, { value: e.target.value })}
+                          />
+                          <button type="button" onClick={() => removeOption(idx, optIdx)} className="text-xs text-red-500">
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                      {!field.options.length && (
+                        <p className="text-xs text-slate-400">No options added yet.</p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Availability slot editor */}
+                  {field.fieldType === 'availability' && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium text-slate-700">Time Slots (Calendly)</span>
+                        <span className="text-xs text-slate-400">Recurring availability + one-off slots</span>
+                      </div>
+                      <p className="text-xs text-slate-400">
+                        Students pick one slot when they submit. Capacity stops a slot once it's fully booked (set 1 for a personal one-on-one booking).
+                      </p>
+
+                      {/* Recurring weekly availability */}
+                      {(() => {
+                        const rec = getRecurring(field)
+                        const r = rec?.recurring || {}
+                        return (
+                          <div className="border border-slate-200 rounded-lg p-3 space-y-3 bg-white">
+                            <div className="flex items-center justify-between">
+                              <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
+                                <input
+                                  type="checkbox"
+                                  checked={!!rec}
+                                  onChange={(e) => (e.target.checked ? updateRecurring(idx, {}) : removeRecurring(idx))}
+                                  className="accent-sky-600"
+                                />
+                                Recurring weekly availability
+                              </label>
+                              {rec && (
+                                <button type="button" onClick={() => removeRecurring(idx)} className="text-xs text-red-500 hover:underline">
+                                  Remove
+                                </button>
+                              )}
+                            </div>
+                            {rec && (
+                              <>
+                                <div>
+                                  <p className="text-xs text-slate-600 mb-1.5">Days of the week</p>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((dayName, d) => {
+                                      const dayNum = d + 1
+                                      const active = (r.weekdays || []).includes(dayNum)
+                                      return (
+                                        <button
+                                          key={dayNum}
+                                          type="button"
+                                          onClick={() =>
+                                            updateRecurring(
+                                              idx,
+                                              active
+                                                ? { weekdays: (r.weekdays || []).filter((x) => x !== dayNum) }
+                                                : { weekdays: [...(r.weekdays || []), dayNum] }
+                                            )
+                                          }
+                                          className={`rounded-lg px-2.5 py-1 text-xs border ${
+                                            active ? 'bg-indigo-600 text-white border-sky-600' : 'border-slate-200 text-slate-600'
+                                          }`}
+                                        >
+                                          {dayName}
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <label className="text-xs text-slate-600 block">
+                                    Start time
+                                    <input
+                                      type="time"
+                                      className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                      value={r.startTime || '09:00'}
+                                      onChange={(e) => updateRecurring(idx, { startTime: e.target.value })}
+                                    />
+                                  </label>
+                                  <label className="text-xs text-slate-600 block">
+                                    End time
+                                    <input
+                                      type="time"
+                                      className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                      value={r.endTime || '17:00'}
+                                      onChange={(e) => updateRecurring(idx, { endTime: e.target.value })}
+                                    />
+                                  </label>
+                                  <label className="text-xs text-slate-600 block">
+                                    Slot length (min)
+                                    <input
+                                      type="number"
+                                      min="15"
+                                      step="15"
+                                      className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                      value={r.slotMinutes || 60}
+                                      onChange={(e) => updateRecurring(idx, { slotMinutes: Number(e.target.value) || 60 })}
+                                    />
+                                  </label>
+                                  <label className="text-xs text-slate-600 block">
+                                    Booking capacity per slot
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                      value={r.capacity || 1}
+                                      onChange={(e) => updateRecurring(idx, { capacity: Number(e.target.value) || 1 })}
+                                    />
+                                  </label>
+                                  <label className="text-xs text-slate-600 block col-span-2">
+                                    Bookable for next (weeks)
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="12"
+                                      className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                      value={r.weeksAhead || 4}
+                                      onChange={(e) => updateRecurring(idx, { weeksAhead: Number(e.target.value) || 4 })}
+                                    />
+                                  </label>
+                                </div>
+                                <label className="text-xs text-slate-600 block">
+                                  Label (shown to students)
+                                  <input
+                                    className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                    placeholder="e.g. Weekly mentorship slot"
+                                    value={rec.label || ''}
+                                    onChange={(e) => updateRecurringMeta(idx, { label: e.target.value })}
+                                  />
+                                </label>
+                              </>
+                            )}
+                          </div>
+                        )
+                      })()}
+
+                      {/* One-off manual slots */}
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-sm font-medium text-slate-700">One-off slots</span>
+                        <button type="button" onClick={() => addSlot(idx)} className="text-xs text-sky-600 hover:underline">
+                          + Add Slot
+                        </button>
+                      </div>
+                      {field.options.map((opt, optIdx) => (
+                        opt.recurring ? null : (
+                        <div key={optIdx} className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50">
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="text-xs text-slate-600 block">
+                              Date
+                              <input
+                                type="date"
+                                className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                value={opt.date || ''}
+                                onChange={(e) => updateOption(idx, optIdx, { date: e.target.value })}
+                              />
+                            </label>
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="text-xs text-slate-600 block">
+                                Start
+                                <input
+                                  type="time"
+                                  className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                  value={opt.start || ''}
+                                  onChange={(e) => updateOption(idx, optIdx, { start: e.target.value })}
+                                />
+                              </label>
+                              <label className="text-xs text-slate-600 block">
+                                End
+                                <input
+                                  type="time"
+                                  className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                  value={opt.end || ''}
+                                  onChange={(e) => updateOption(idx, optIdx, { end: e.target.value })}
+                                />
+                              </label>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-[1fr_auto_auto] gap-2 items-end">
+                            <label className="text-xs text-slate-600 block">
+                              Label (shown to students)
+                              <input
+                                className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                placeholder="e.g. Meeting with the Rector"
+                                value={opt.label}
+                                onChange={(e) => updateOption(idx, optIdx, { label: e.target.value })}
+                              />
+                            </label>
+                            <label className="text-xs text-slate-600 block w-20">
+                              Capacity
+                              <input
+                                type="number"
+                                min="1"
+                                className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm"
+                                value={opt.capacity || 1}
+                                onChange={(e) => updateOption(idx, optIdx, { capacity: Number(e.target.value) || 1 })}
+                              />
+                            </label>
+                            <button type="button" onClick={() => removeOption(idx, optIdx)} className="text-xs text-red-500 pb-1.5">
+                              ×
+                            </button>
+                          </div>
+                        </div>
+                        )
+                      ))}
+                      {(() => {
+                        const manualCount = (field.options || []).filter((o) => !o || !o.recurring).length
+                        const rec = getRecurring(field)
+                        return (!manualCount && !rec) ? (
+                          <p className="text-xs text-slate-400">No time slots added yet.</p>
+                        ) : null
+                      })()}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {!fields.length && (
+                <p className="text-sm text-slate-400 text-center py-4">No fields added yet. Click "Add Field" to start.</p>
+              )}
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex gap-3 pt-3 border-t border-slate-200">
+            <button
+              type="submit"
+              disabled={saving || !title.trim() || !slug.trim()}
+              className="btn btn-primary rounded-xl px-6 py-2 text-sm disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : form ? 'Update Form' : 'Create Form'}
+            </button>
+            <button type="button" onClick={onClose} className="bg-slate-100 text-slate-700 rounded-xl px-6 py-2 text-sm">
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}

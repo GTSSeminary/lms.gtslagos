@@ -1,71 +1,113 @@
-# GTS Student LMS
+# Seminary Academic Management System (SAMS)
 
-A **standalone, student-facing Learning Management System (SPA)** for GTS Seminary
-students. It is a **separate application** that consumes the existing GTS **admin API** —
-it has **no backend of its own** and **never touches the admin database directly**.
+Modern production-ready web application for managing seminary academics: students, attendance, eligibility, assignments, and results.
 
 ## Stack
 
-- **Vite + React 19 (JavaScript, not TypeScript)**
-- **Tailwind CSS v4**
-- **React Router v7**
-- Functional components + hooks
+- Frontend: React + Vite + Tailwind CSS
+- Backend: Node.js + Express
+- Database: PostgreSQL
+- Auth: JWT (email/password)
+- Email: Nodemailer (SMTP)
 
-This mirrors the admin client's stack for compatibility.
+## Features Implemented
 
-## Design system
+- Role-based authentication (`admin`, `lecturer`, `student`)
+- Student management with auto matric generation (`GTT00001`, `GTT00002`, ...)
+- Course management with duration and attendance threshold
+- Lecturer-controlled timed attendance session
+  - one active session per course
+  - countdown support via `end_time`
+  - duplicate attendance prevention
+- Eligibility engine based on attendance threshold
+- Assignment creation and delivery to eligible students only
+  - dashboard delivery
+  - email delivery when SMTP is configured
+- Result upload (`0-100`) with auto status (`Pass` / `Fail`)
+- Admission workflow
+  - Admission offer email template (`Admission Offer`) with dynamic per-student variables
+    (`{{student_name}}`, `{{admission_no}}`, `{{matric_no}}`, `{{course_name}}`, `{{course_start_date}}`, `{{academic_session}}`, ...)
+  - Send a student's admission letter from their profile (`POST /api/email-processes/admission/:studentId/send`)
+  - Create / manage admission email templates (`POST /api/email-processes/admission`)
+- Student first-course tracking
+  - Auto-assigned on enrollment when unknown (`students.first_course_id`)
+  - Manually set / edit per student (student profile → First course)
+- Course management
+  - Edit course details (title, description, code, lecturer, secondary lecturer, dates, class schedule, features)
+- Role dashboards
+  - Admin: students, courses, analytics
+  - Lecturer: courses, attendance, assignments, results
+  - Student: courses, attendance progress, eligibility, assignments, results
 
-- Primary indigo `#4F46E5` (Tailwind `indigo-600`)
-- Page background `#F8FAFC` (Tailwind `slate-50`)
-- White cards, `rounded-3xl` (24px), subtle shadow, `gap-4` spacing
-- Fonts: **Outfit** (display/headings), **Inter** (body), **JetBrains Mono** (data/numbers)
-  loaded via Google Fonts `<link>` in `index.html`
+## Project Structure
 
-## Getting started
+- `client/` React app
+- `server/` Express API
+
+## Setup
+
+### 1) Database
+
+Create PostgreSQL database:
 
 ```bash
+createdb sams_db
+```
+
+### 2) Backend
+
+```bash
+cd server
+cp .env.example .env
+npm install
+npm run db:init
+npm run dev
+```
+
+API runs on `http://localhost:5000`.
+
+### 3) Frontend
+
+```bash
+cd client
+cp .env.example .env
 npm install
 npm run dev
 ```
 
-The app reads the API base URL from `VITE_API_URL`, falling back to
-`https://api.gtslagos.com`. Copy `.env.example` to `.env` and adjust if needed:
+Frontend runs on `http://localhost:5173`.
 
-```bash
-cp .env.example .env
-```
+## Default Demo Credentials
 
-```
-VITE_API_URL=https://api.gtslagos.com
-```
+Created by `npm run db:init`:
 
-## Scripts
+- `admin@sams.local` / `Password123!`
+- `lecturer@sams.local` / `Password123!`
+- `student@sams.local` / `Password123!`
 
-- `npm run dev` — start the Vite dev server
-- `npm run build` — production build to `dist/`
-- `npm run preview` — preview the production build locally
+## API Overview
 
-## Pages
+- `POST /api/auth/login`
+- `GET /api/auth/me`
+- `GET|POST /api/students` (admin)
+- `POST /api/students/enroll` (admin)
+- `GET|POST /api/courses`
+- `GET /api/courses/my-courses` (student)
+- `GET /api/courses/:courseId/students` (admin, lecturer)
+- `POST /api/attendance/start` (admin, lecturer)
+- `GET /api/attendance/course/:courseId/status`
+- `POST /api/attendance/mark` (student)
+- `GET /api/attendance/course/:courseId/progress` (student)
+- `POST /api/assignments` (admin, lecturer)
+- `GET /api/assignments/my` (student)
+- `POST /api/results` (admin, lecturer)
+- `GET /api/results/my` (student)
+- `POST /api/email-processes/admission` (admin) — create admission email template
+- `POST /api/email-processes/admission/:studentId/send` (admin) — send admission letter to one student
+- `GET /api/dashboard/admin-analytics` (admin)
 
-| Route                | Description                                          |
-| -------------------- | ---------------------------------------------------- |
-| `/login`             | Student email/password login                         |
-| `/forgot-password`   | Request a password reset code                        |
-| `/reset-password`    | Reset password with code                             |
-| `/dashboard`         | Greeting + summary cards + quick links               |
-| `/study-guide`       | Study plan timeline                                  |
-| `/courses`           | Courses grouped by state                             |
-| `/courses/:courseId` | Course overview, sessions, materials, attendance     |
-| `/exams`             | MCQ (admin quiz in new tab) + essay inline submit    |
-| `/results`           | Pass/Fail results table                              |
-| `/attendance`        | Per-course attendance vs. minimum                    |
-| `/graduation`        | Graduation status & set info                         |
-| `/profile`           | Account details                                      |
+## Notes
 
-## Deploying to Vercel (lms.gtslagos.com)
-
-1. Push this repo to GitHub/GitLab and import it into Vercel.
-2. Set the build command to `npm run build` and output directory to `dist`.
-3. Add the environment variable `VITE_API_URL=https://api.gtslagos.com`.
-4. Add a domain: `lms.gtslagos.com` (configure DNS / Vercel's auto-DNS).
-5. `vercel.json` already rewrites all routes to `index.html` for SPA routing.
+- Eligibility is automatic from attendance records only (no manual override).
+- Attendance sessions auto-close when queried after expiration.
+- For email delivery, provide SMTP credentials in `server/.env`.

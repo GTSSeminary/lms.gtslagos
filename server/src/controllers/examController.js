@@ -1,0 +1,971 @@
+import { randomBytes } from 'node:crypto'
+import { pool, query } from '../db/pool.js'
+import { httpError } from '../utils/httpError.js'
+import {
+  getEligibleStudentsForCourse,
+  getEligibleStudentsForBatch,
+} from '../services/eligibilityService.js'
+import { sendExamEmail, sendMcqResultEmail } from '../services/emailService.js'
+import { env } from '../config/env.js'
+
+const generateAccessCode = () =>
+  randomBytes(5).toString('base64url').toUpperCase().slice(0, 8)
+
+const generatePublicToken = () => randomBytes(18).toString('base64url')
+
+const quizTakeUrl = (token) => `${env.clientUrl.replace(/\/$/, '')}/quiz/${token}`
+
+const normalizeMcqOptions = (options) => {
+  if (!Array.isArray(options)) return []
+  return options
+    .map((opt, i) => {
+      if (typeof opt === 'string') {
+        const label = opt.trim()
+        if (!label) return null
+        return { key: String.fromCharCode(65 + i), label }
+      }
+      const label = String(opt?.label || opt?.text || '').trim()
+      if (!label) return null
+      const key = String(opt?.key || String.fromCharCode(65 + i)).toUpperCase().slice(0, 8)
+      return { key, label }
+    })
+    .filter(Boolean)
+}
+
+const getExamById = async (id) => {
+  const examResult = await query('SELECT * FROM exams WHERE id = $1', [id])
+  if (!examResult.rows.length) return null
+
+  const exam = examResult.rows[0]
+  const questionsResult = await query(
+    'SELECT * FROM exam_questions WHERE exam_id = $1 ORDER BY order_index ASC',
+    [exam.id]
+  )
+  const deliveryResult = await query(
+    `SELECT COUNT(*)::int AS count FROM exam_deliveries WHERE exam_id = $1`,
+    [exam.id]
+  )
+  const submissionResult = await query(
+    `SELECT COUNT(*)::int AS count FROM exam_submissions WHERE exam_id = $1`,
+    [exam.id]
+  ).catch(() => ({ rows: [{ count: 0 }] }))
+
+  const takeUrl = exam.exam_type === 'mcq' && exam.public_token
+    ? quizTakeUrl(exam.public_token)
+    : null
+
+  return {
+    ...exam,
+    questions: questionsResult.rows,
+    delivery_count: deliveryResult.rows[0].count,
+    submission_count: submissionResult.rows[0]?.count || 0,
+    take_url: takeUrl,
+  }
+}
+
+export const createExam = async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    const { courseId, batchId, planId, title, description, dueDate, questions, examType } = req.body
+
+    if (!courseId || !title) {
+      throw httpError(400, 'courseId and title are required')
+    }
+
+    const type = ['mcq', 'paper'].includes(examType) ? examType : 'essay'
+    const qs = Array.isArray(questions) ? questions : []
+
+    if (type === 'mcq') {
+      const valid = qs.filter((q) => {
+        const text = String(q?.text || q?.questionText || '').trim()
+        const opts = normalizeMcqOptions(q?.options)
+        const correct = String(q?.correctAnswer || q?.correct_answer || '').toUpperCase()
+        return text && opts.length >= 2 && opts.some((o) => o.key === correct)
+      })
+      if (!valid.length) {
+        throw httpError(400, 'MCQ exams need at least one question with 2+ options and a correct answer')
+      }
+    } else if (type === 'essay' && !qs.some((q) => String(q?.text || q?.questionText || '').trim())) {
+      throw httpError(400, 'Add at least one exam question for essay exams')
+    }
+    // 'paper' exams need no pre-set questions — students write one formatted paper in the LMS
+
+    // Timer: MCQ exams can specify a duration in minutes (paper/essay never time-limited)
+    const parsedDuration = Number(req.body.durationMinutes)
+    const durationMinutes =
+      type === 'mcq' && Number.isFinite(parsedDuration) && parsedDuration > 0
+        ? Math.min(600, Math.round(parsedDuration))
+        : null
+
+    // Optional date when MCQ results become visible to students
+    let resultsReleaseAt = null
+    if (req.body.resultsReleaseAt) {
+      const d = new Date(req.body.resultsReleaseAt)
+      if (!Number.isNaN(d.getTime())) resultsReleaseAt = d.toISOString()
+    }
+
+    const courseResult = await client.query('SELECT id FROM courses WHERE id = $1', [courseId])
+    if (!courseResult.rows.length) throw httpError(404, 'Course not found')
+
+    await client.query('BEGIN')
+
+    const publicToken = type === 'mcq' ? generatePublicToken() : null
+
+    const examResult = await client.query(
+      `INSERT INTO exams (course_id, batch_id, plan_id, title, description, due_date, exam_type, duration_minutes, results_release_at, quiz_url, public_token, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING *`,
+      [
+        courseId,
+        batchId || null,
+        planId || null,
+        title,
+        description || null,
+        dueDate || null,
+        type,
+        durationMinutes,
+        resultsReleaseAt,
+        null,
+        publicToken,
+        req.user.userId,
+      ]
+    )
+
+    const exam = examResult.rows[0]
+
+    for (let i = 0; i < qs.length; i++) {
+      const q = qs[i]
+      const text = String(q?.text || q?.questionText || '').trim()
+      if (!text) continue
+
+      if (type === 'mcq') {
+        const opts = normalizeMcqOptions(q?.options)
+        const correct = String(q?.correctAnswer || q?.correct_answer || '').toUpperCase()
+        if (opts.length < 2 || !opts.some((o) => o.key === correct)) continue
+        await client.query(
+          `INSERT INTO exam_questions (exam_id, question_text, order_index, options, correct_answer)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [exam.id, text, i, JSON.stringify(opts), correct]
+        )
+      } else {
+        await client.query(
+          `INSERT INTO exam_questions (exam_id, question_text, order_index)
+           VALUES ($1, $2, $3)`,
+          [exam.id, text, i]
+        )
+      }
+    }
+
+    await client.query('COMMIT')
+
+    const created = await getExamById(exam.id)
+    res.status(201).json(created)
+  } catch (error) {
+    await client.query('ROLLBACK')
+    next(error)
+  } finally {
+    client.release()
+  }
+}
+
+export const listExamsByCourse = async (req, res, next) => {
+  try {
+    const courseId = Number(req.params.courseId)
+    if (!courseId) throw httpError(400, 'Valid courseId is required')
+
+    const result = await query(
+      `SELECT ex.*,
+              u.full_name AS created_by_name,
+              b.name AS batch_name,
+              p.name AS plan_name,
+              p.year AS plan_year,
+              (SELECT COUNT(*)::int FROM exam_questions eq WHERE eq.exam_id = ex.id) AS question_count,
+              (SELECT COUNT(*)::int FROM exam_deliveries ed WHERE ed.exam_id = ex.id) AS delivery_count,
+              (SELECT COUNT(*)::int FROM exam_submissions es WHERE es.exam_id = ex.id) AS submission_count
+       FROM exams ex
+       LEFT JOIN users u ON u.id = ex.created_by
+       LEFT JOIN batches b ON b.id = ex.batch_id
+       LEFT JOIN course_plans p ON p.id = ex.plan_id
+       WHERE ex.course_id = $1
+       ORDER BY ex.created_at DESC`,
+      [courseId]
+    )
+
+    const rows = result.rows.map((ex) => ({
+      ...ex,
+      take_url: ex.exam_type === 'mcq' && ex.public_token ? quizTakeUrl(ex.public_token) : null,
+    }))
+
+    res.json(rows)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const getExamEligibleStudents = async (req, res, next) => {
+  try {
+    const courseId = Number(req.params.courseId)
+    if (!courseId) throw httpError(400, 'Valid courseId is required')
+
+    const students = await getEligibleStudentsForCourse(courseId)
+    res.json(students)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const getExamEligibleStudentsByBatch = async (req, res, next) => {
+  try {
+    const batchId = Number(req.params.batchId)
+    if (!batchId) throw httpError(400, 'Valid batchId is required')
+
+    const students = await getEligibleStudentsForBatch(batchId)
+    res.json(students)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const sendExam = async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    const examId = Number(req.params.examId)
+    if (!examId) throw httpError(400, 'Valid examId is required')
+
+    const { studentIds } = req.body
+
+    const examResult = await client.query(
+      `SELECT ex.*, c.title AS course_title
+       FROM exams ex
+       JOIN courses c ON c.id = ex.course_id
+       WHERE ex.id = $1`,
+      [examId]
+    )
+    if (!examResult.rows.length) throw httpError(404, 'Exam not found')
+    const exam = examResult.rows[0]
+
+    // Ensure MCQ exams have a public take token
+    if (exam.exam_type === 'mcq' && !exam.public_token) {
+      const token = generatePublicToken()
+      await client.query('UPDATE exams SET public_token = $1 WHERE id = $2', [token, examId])
+      exam.public_token = token
+    }
+
+    const questionsResult = await client.query(
+      'SELECT question_text FROM exam_questions WHERE exam_id = $1 ORDER BY order_index ASC',
+      [examId]
+    )
+    const questions = questionsResult.rows
+
+    let students
+    if (Array.isArray(studentIds) && studentIds.length) {
+      const idList = studentIds.map(Number).filter(Boolean)
+      if (!idList.length) throw httpError(400, 'No valid studentIds provided')
+      const studentResult = await client.query(
+        `SELECT s.id, u.full_name, u.email
+         FROM students s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.id = ANY($1::int[])`,
+        [idList]
+      )
+      students = studentResult.rows
+    } else {
+      students = exam.batch_id
+        ? await getEligibleStudentsForBatch(exam.batch_id)
+        : await getEligibleStudentsForCourse(exam.course_id)
+    }
+
+    let sent = 0
+    let failed = 0
+    const errors = []
+    const isMcq = exam.exam_type === 'mcq'
+    const takeUrl = isMcq && exam.public_token ? quizTakeUrl(exam.public_token) : null
+
+    for (const student of students) {
+      try {
+        const accessCode = isMcq ? generateAccessCode() : null
+        await sendExamEmail({
+          to: student.email,
+          studentName: student.full_name,
+          courseTitle: exam.course_title,
+          examTitle: exam.title,
+          dueDate: exam.due_date,
+          questions,
+          examType: exam.exam_type,
+          quizUrl: takeUrl,
+          accessCode,
+        })
+        await client.query(
+          `INSERT INTO exam_deliveries (exam_id, student_id, delivered_at, email_sent, access_code)
+           VALUES ($1, $2, NOW(), TRUE, $3)
+           ON CONFLICT (exam_id, student_id)
+           DO UPDATE SET delivered_at = NOW(), email_sent = TRUE, access_code = EXCLUDED.access_code`,
+          [examId, student.id, accessCode]
+        )
+        sent++
+      } catch (err) {
+        failed++
+        errors.push({ student: student.full_name, email: student.email, error: err.message })
+      }
+    }
+
+    res.json({ sent, failed, errors, total: students.length, takeUrl })
+  } catch (error) {
+    next(error)
+  } finally {
+    client.release()
+  }
+}
+
+export const getStudentExams = async (req, res, next) => {
+  try {
+    const studentResult = await query('SELECT id FROM students WHERE user_id = $1', [req.user.userId])
+    const student = studentResult.rows[0]
+    if (!student) throw httpError(404, 'Student profile not found')
+
+    const result = await query(
+      `SELECT d.id AS delivery_id,
+              d.delivered_at,
+              d.access_code,
+              ex.id AS exam_id,
+              ex.title,
+              ex.description,
+              ex.due_date,
+              ex.exam_type,
+              ex.duration_minutes,
+              ex.public_token,
+              ex.results_release_at,
+              c.title AS course_title,
+              es.id AS submission_id,
+              es.score AS submission_score,
+              es.submitted_at,
+              es.result_sent_at,
+              COALESCE(
+                json_agg(
+                  json_build_object('id', eq.id, 'question_text', eq.question_text, 'order_index', eq.order_index)
+                  ORDER BY eq.order_index ASC
+                ) FILTER (WHERE eq.id IS NOT NULL AND ex.exam_type = 'essay'),
+                '[]'::json
+              ) AS questions
+       FROM exam_deliveries d
+       JOIN exams ex ON ex.id = d.exam_id
+       JOIN courses c ON c.id = ex.course_id
+       LEFT JOIN exam_questions eq ON eq.exam_id = ex.id
+       LEFT JOIN exam_submissions es ON es.exam_id = ex.id AND es.student_id = d.student_id
+       WHERE d.student_id = $1
+       GROUP BY d.id, ex.id, c.title, es.id
+       ORDER BY d.delivered_at DESC`,
+      [student.id]
+    )
+
+    const now = new Date()
+    const rows = result.rows.map((row) => {
+      // MCQ scores stay hidden on the exam card until the release date (if any) passes
+      const released = !row.results_release_at || new Date(row.results_release_at) <= now
+      return {
+        ...row,
+        submission_score:
+          row.exam_type === 'mcq' && !released ? null : row.submission_score,
+        quiz_url: row.exam_type === 'mcq' && row.public_token ? quizTakeUrl(row.public_token) : null,
+      }
+    })
+
+    res.json(rows)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const deleteExam = async (req, res, next) => {
+  try {
+    const examId = Number(req.params.examId)
+    if (!examId) throw httpError(400, 'Valid examId is required')
+
+    const result = await query('DELETE FROM exams WHERE id = $1 RETURNING id', [examId])
+    if (!result.rows.length) throw httpError(404, 'Exam not found')
+    res.json({ message: 'Exam deleted' })
+  } catch (error) {
+    next(error)
+  }
+}
+
+// ── Public MCQ take flow (no auth; access code identifies the student) ──────
+
+export const getPublicQuiz = async (req, res, next) => {
+  try {
+    const { token } = req.params
+    if (!token) throw httpError(400, 'Quiz token is required')
+
+    const examResult = await query(
+      `SELECT ex.id, ex.title, ex.description, ex.due_date, ex.exam_type, ex.public_token, ex.duration_minutes,
+              c.title AS course_title
+       FROM exams ex
+       JOIN courses c ON c.id = ex.course_id
+       WHERE ex.public_token = $1 AND ex.exam_type = 'mcq'`,
+      [token]
+    )
+    if (!examResult.rows.length) throw httpError(404, 'Quiz not found')
+    const exam = examResult.rows[0]
+
+    // Do NOT leak correct answers or options until unlocked with access code
+    res.json({
+      id: exam.id,
+      title: exam.title,
+      description: exam.description,
+      due_date: exam.due_date,
+      duration_minutes: exam.duration_minutes,
+      course_title: exam.course_title,
+      locked: true,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const unlockPublicQuiz = async (req, res, next) => {
+  try {
+    const { token } = req.params
+    const accessCode = String(req.body?.accessCode || req.body?.access_code || '').trim().toUpperCase()
+    if (!token || !accessCode) throw httpError(400, 'Access code is required')
+
+    const examResult = await query(
+      `SELECT ex.id, ex.title, ex.description, ex.due_date, ex.exam_type, ex.public_token, ex.duration_minutes,
+              c.title AS course_title
+       FROM exams ex
+       JOIN courses c ON c.id = ex.course_id
+       WHERE ex.public_token = $1 AND ex.exam_type = 'mcq'`,
+      [token]
+    )
+    if (!examResult.rows.length) throw httpError(404, 'Quiz not found')
+    const exam = examResult.rows[0]
+
+    const now = new Date()
+    if (exam.open_at && now < new Date(exam.open_at)) {
+      throw httpError(403, 'This exam is not open yet')
+    }
+    if (exam.close_at && now > new Date(exam.close_at)) {
+      throw httpError(403, 'This exam is now closed')
+    }
+
+    const deliveryResult = await query(
+      `SELECT d.id AS delivery_id, d.student_id, d.access_code, d.unlocked_at,
+              u.full_name AS student_name, u.email AS student_email
+       FROM exam_deliveries d
+       JOIN students s ON s.id = d.student_id
+       JOIN users u ON u.id = s.user_id
+       WHERE d.exam_id = $1 AND UPPER(d.access_code) = $2`,
+      [exam.id, accessCode]
+    )
+    if (!deliveryResult.rows.length) throw httpError(403, 'Invalid access code')
+    const delivery = deliveryResult.rows[0]
+
+    // Anchor the timer on first unlock — every later unlock resumes the same countdown
+    let unlockedAt = delivery.unlocked_at
+    if (!unlockedAt) {
+      const started = await query(
+        `UPDATE exam_deliveries SET unlocked_at = NOW() WHERE id = $1 RETURNING unlocked_at`,
+        [delivery.delivery_id]
+      )
+      unlockedAt = started.rows[0].unlocked_at
+    }
+
+    // Server-computed remaining time (authoritative; duration_minutes = null → untimed)
+    let remainingSeconds = null
+    if (exam.duration_minutes && exam.duration_minutes > 0) {
+      const elapsed = Math.max(0, Math.floor((now - new Date(unlockedAt)) / 1000))
+      remainingSeconds = exam.duration_minutes * 60 - elapsed
+      if (remainingSeconds <= 0) {
+        throw httpError(403, 'Exam time has expired. Contact your lecturer to reset your access.')
+      }
+    }
+
+    const existing = await query(
+      `SELECT id, score, total_questions, correct_count, submitted_at
+       FROM exam_submissions WHERE exam_id = $1 AND student_id = $2`,
+      [exam.id, delivery.student_id]
+    )
+
+    const questionsResult = await query(
+      `SELECT id, question_text, order_index, options
+       FROM exam_questions WHERE exam_id = $1 ORDER BY order_index ASC`,
+      [exam.id]
+    )
+
+    // Strip correct_answer — never send to client
+    const questions = questionsResult.rows.map((q) => ({
+      id: q.id,
+      question_text: q.question_text,
+      order_index: q.order_index,
+      options: q.options || [],
+    }))
+
+    res.json({
+      id: exam.id,
+      title: exam.title,
+      description: exam.description,
+      due_date: exam.due_date,
+      duration_minutes: exam.duration_minutes,
+      remaining_seconds: remainingSeconds,
+      course_title: exam.course_title,
+      student_name: delivery.student_name,
+      delivery_id: delivery.delivery_id,
+      already_submitted: existing.rows.length > 0,
+      submission: existing.rows[0] || null,
+      questions,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const submitPublicQuiz = async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    const { token } = req.params
+    const accessCode = String(req.body?.accessCode || req.body?.access_code || '').trim().toUpperCase()
+    const answers = req.body?.answers || {}
+
+    if (!token || !accessCode) throw httpError(400, 'Access code is required')
+    if (!answers || typeof answers !== 'object') throw httpError(400, 'Answers are required')
+
+    const examResult = await client.query(
+      `SELECT ex.id, ex.title, ex.due_date, ex.exam_type, ex.duration_minutes,
+              ex.course_id, ex.batch_id, ex.results_release_at
+       FROM exams ex
+       WHERE ex.public_token = $1 AND ex.exam_type = 'mcq'`,
+      [token]
+    )
+    if (!examResult.rows.length) throw httpError(404, 'Quiz not found')
+    const exam = examResult.rows[0]
+
+    const now = new Date()
+    if (exam.open_at && now < new Date(exam.open_at)) {
+      throw httpError(403, 'This exam is not open yet')
+    }
+    if (exam.close_at && now > new Date(exam.close_at)) {
+      throw httpError(403, 'This exam is now closed')
+    }
+
+    // Enforce the timer server-side (30s grace for upload latency).
+    // No unlocked_at / no duration → untimed, always allow.
+    if (exam.duration_minutes > 0 && delivery.unlocked_at) {
+      const elapsed = (now - new Date(delivery.unlocked_at)) / 1000
+      if (elapsed > exam.duration_minutes * 60 + 30) {
+        throw httpError(403, 'Exam time has expired — your submission was not accepted. Contact your lecturer.')
+      }
+    }
+
+    // Record the course result immediately, gated by the optional release date.
+    // If no release date is set, the result publishes at submission time.
+    const mcqReleased = !exam.results_release_at || new Date(exam.results_release_at) <= now
+    try {
+      await client.query(
+        `INSERT INTO results (course_id, batch_id, student_id, result_type, score, status, published, uploaded_by, exam_id)
+         SELECT e.course_id, e.batch_id, $2, 'Exam', $3, (CASE WHEN $3 >= 50 THEN 'Pass' ELSE 'Fail' END), $4, e.created_by, e.id
+         FROM exams e WHERE e.id = $1
+         ON CONFLICT (course_id, student_id, result_type)
+         DO UPDATE SET score = EXCLUDED.score, status = EXCLUDED.status,
+                       published = EXCLUDED.published, exam_id = EXCLUDED.exam_id`,
+        [exam.id, delivery.student_id, score, mcqReleased]
+      )
+    } catch (resultErr) {
+      // Result recording must never block the quiz submission itself
+      console.error('MCQ result upsert failed:', resultErr.message)
+    }
+
+    const existing = await client.query(
+      `SELECT id FROM exam_submissions WHERE exam_id = $1 AND student_id = $2`,
+      [exam.id, delivery.student_id]
+    )
+    if (existing.rows.length) {
+      throw httpError(400, 'You have already submitted this quiz')
+    }
+
+    const questionsResult = await client.query(
+      `SELECT id, correct_answer FROM exam_questions WHERE exam_id = $1 ORDER BY order_index ASC`,
+      [exam.id]
+    )
+    const questions = questionsResult.rows
+    if (!questions.length) throw httpError(400, 'This quiz has no questions')
+
+    let correctCount = 0
+    const normalizedAnswers = {}
+    for (const q of questions) {
+      const chosen = String(answers[q.id] ?? answers[String(q.id)] ?? '').toUpperCase().trim()
+      normalizedAnswers[String(q.id)] = chosen
+      if (chosen && chosen === String(q.correct_answer || '').toUpperCase()) {
+        correctCount++
+      }
+    }
+
+    const total = questions.length
+    const score = Math.round((correctCount / total) * 10000) / 100
+
+    await client.query('BEGIN')
+    const insert = await client.query(
+      `INSERT INTO exam_submissions
+         (exam_id, student_id, delivery_id, answers, score, total_questions, correct_count, submitted_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+       RETURNING id, score, total_questions, correct_count, submitted_at`,
+      [exam.id, delivery.student_id, delivery.delivery_id, JSON.stringify(normalizedAnswers), score, total, correctCount]
+    )
+    await client.query('COMMIT')
+
+    // Do not reveal score details beyond confirmation — results mailed later by lecturer
+    res.status(201).json({
+      message: 'Quiz submitted successfully. Your result will be sent when the lecturer releases it.',
+      submission_id: insert.rows[0].id,
+      submitted_at: insert.rows[0].submitted_at,
+    })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    next(error)
+  } finally {
+    client.release()
+  }
+}
+
+export const listExamSubmissions = async (req, res, next) => {
+  try {
+    const examId = Number(req.params.examId)
+    if (!examId) throw httpError(400, 'Valid examId is required')
+
+    const examResult = await query('SELECT id, title, exam_type FROM exams WHERE id = $1', [examId])
+    if (!examResult.rows.length) throw httpError(404, 'Exam not found')
+
+    const questionsResult = await query(
+      'SELECT id, question_text, order_index FROM exam_questions WHERE exam_id = $1 ORDER BY order_index ASC',
+      [examId]
+    )
+
+    // Lecturers may only see submissions for exams in their assigned courses
+    if (req.user.role === 'lecturer') {
+      const owned = await query(
+        `SELECT 1 FROM exams ex JOIN courses c ON c.id = ex.course_id
+         WHERE ex.id = $1 AND (c.lecturer_id = $2 OR c.secondary_lecturer_id = $2)`,
+        [examId, req.user.userId]
+      )
+      if (!owned.rows.length) throw httpError(403, 'This exam is not in your assigned courses')
+    }
+
+    const result = await query(
+      `SELECT es.*,
+              u.full_name AS student_name,
+              u.email AS student_email,
+              s.matric_number
+       FROM exam_submissions es
+       JOIN students s ON s.id = es.student_id
+       JOIN users u ON u.id = s.user_id
+       WHERE es.exam_id = $1
+       ORDER BY es.submitted_at DESC`,
+      [examId]
+    )
+
+    res.json({
+      exam: examResult.rows[0],
+      questions: questionsResult.rows,
+      submissions: result.rows,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const sendExamResults = async (req, res, next) => {
+  try {
+    const examId = Number(req.params.examId)
+    if (!examId) throw httpError(400, 'Valid examId is required')
+
+    const examResult = await query(
+      `SELECT ex.*, c.title AS course_title
+       FROM exams ex
+       JOIN courses c ON c.id = ex.course_id
+       WHERE ex.id = $1`,
+      [examId]
+    )
+    if (!examResult.rows.length) throw httpError(404, 'Exam not found')
+    const exam = examResult.rows[0]
+    if (exam.exam_type !== 'mcq') throw httpError(400, 'Result mailing is only for MCQ exams')
+
+    const { studentIds } = req.body || {}
+    let submissions
+    if (Array.isArray(studentIds) && studentIds.length) {
+      const idList = studentIds.map(Number).filter(Boolean)
+      const result = await query(
+        `SELECT es.*, u.full_name AS student_name, u.email AS student_email
+         FROM exam_submissions es
+         JOIN students s ON s.id = es.student_id
+         JOIN users u ON u.id = s.user_id
+         WHERE es.exam_id = $1 AND es.student_id = ANY($2::int[])`,
+        [examId, idList]
+      )
+      submissions = result.rows
+    } else {
+      const result = await query(
+        `SELECT es.*, u.full_name AS student_name, u.email AS student_email
+         FROM exam_submissions es
+         JOIN students s ON s.id = es.student_id
+         JOIN users u ON u.id = s.user_id
+         WHERE es.exam_id = $1 AND es.result_sent_at IS NULL`,
+        [examId]
+      )
+      submissions = result.rows
+    }
+
+    let sent = 0
+    let failed = 0
+    const errors = []
+
+    for (const sub of submissions) {
+      try {
+        await sendMcqResultEmail({
+          to: sub.student_email,
+          studentName: sub.student_name,
+          courseTitle: exam.course_title,
+          examTitle: exam.title,
+          score: sub.score,
+          correctCount: sub.correct_count,
+          totalQuestions: sub.total_questions,
+        })
+        await query(
+          `UPDATE exam_submissions SET result_sent_at = NOW() WHERE id = $1`,
+          [sub.id]
+        )
+        sent++
+      } catch (err) {
+        failed++
+        errors.push({ student: sub.student_name, email: sub.student_email, error: err.message })
+      }
+    }
+
+    res.json({ sent, failed, errors, total: submissions.length })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const submitStudentExam = async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    const examId = Number(req.params.examId)
+    if (!examId) throw httpError(400, 'Valid examId is required')
+
+    const { answers, type } = req.body || {}
+    if (!type || !['essay', 'assignment', 'paper'].includes(type)) {
+      throw httpError(400, 'type must be essay, paper or assignment')
+    }
+
+    const studentResult = await client.query(
+      'SELECT id FROM students WHERE user_id = $1',
+      [req.user.userId]
+    )
+    const student = studentResult.rows[0]
+    if (!student) throw httpError(404, 'Student profile not found')
+    const studentId = student.id
+
+    const examResult = await client.query(
+      `SELECT ex.id, ex.course_id, ex.batch_id, ex.exam_type,
+              c.min_attendance_required
+       FROM exams ex
+       JOIN courses c ON c.id = ex.course_id
+       WHERE ex.id = $1`,
+      [examId]
+    )
+    if (!examResult.rows.length) throw httpError(404, 'Exam not found')
+    const exam = examResult.rows[0]
+
+    const enrollmentResult = await client.query(
+      `SELECT id FROM enrollments
+       WHERE course_id = $1 AND student_id = $2 AND status IN ('active', 'completed', 'failed')
+       LIMIT 1`,
+      [exam.course_id, studentId]
+    )
+    if (!enrollmentResult.rows.length) {
+      throw httpError(403, 'You are not eligible to submit this exam')
+    }
+
+    const attendanceResult = await client.query(
+      `SELECT COUNT(*)::int AS attendance_count
+       FROM attendance_records ar
+       JOIN attendance_sessions sa ON sa.id = ar.session_id
+       WHERE sa.course_id = $1
+         AND ($2::int IS NULL OR sa.batch_id = $2)
+         AND ar.student_id = $3`,
+      [exam.course_id, exam.batch_id, studentId]
+    )
+    const attendanceCount = attendanceResult.rows[0].attendance_count
+    const minRequired = Number(exam.min_attendance_required || 0)
+    if (attendanceCount < minRequired) {
+      throw httpError(403, 'You are not eligible to submit this exam')
+    }
+
+    const existing = await client.query(
+      'SELECT id FROM exam_submissions WHERE exam_id = $1 AND student_id = $2',
+      [examId, studentId]
+    )
+    if (existing.rows.length) {
+      throw httpError(400, 'Already submitted')
+    }
+
+    const insert = await client.query(
+      `INSERT INTO exam_submissions (exam_id, student_id, answers, status, submitted_at)
+       VALUES ($1, $2, $3, 'pending_marking', NOW())
+       RETURNING id`,
+      [examId, studentId, JSON.stringify(answers || {})]
+    )
+
+    res.status(201).json({ submissionId: insert.rows[0].id, status: 'pending_marking' })
+  } catch (error) {
+    next(error)
+  } finally {
+    client.release()
+  }
+}
+
+export const markSubmission = async (req, res, next) => {
+  const client = await pool.connect()
+  try {
+    const examId = Number(req.params.id)
+    const submissionId = Number(req.params.submissionId)
+    if (!examId) throw httpError(400, 'Valid examId is required')
+    if (!submissionId) throw httpError(400, 'Valid submissionId is required')
+
+    const { score, feedback } = req.body || {}
+    const gradedBy = req.user.userId
+
+    if (score === undefined || score === null || score === '') {
+      throw httpError(400, 'score is required')
+    }
+    const numericScore = Number(score)
+    if (Number.isNaN(numericScore) || numericScore < 0 || numericScore > 100) {
+      throw httpError(400, 'score must be between 0 and 100')
+    }
+
+    // Lecturers may only mark exams in their assigned courses
+    if (req.user.role === 'lecturer') {
+      const owned = await client.query(
+        `SELECT 1 FROM exams ex JOIN courses c ON c.id = ex.course_id
+         WHERE ex.id = $1 AND (c.lecturer_id = $2 OR c.secondary_lecturer_id = $2)`,
+        [examId, gradedBy]
+      )
+      if (!owned.rows.length) throw httpError(403, 'This exam is not in your assigned courses')
+    }
+
+    await client.query('BEGIN')
+
+    const update = await client.query(
+      `UPDATE exam_submissions
+       SET status = 'marked', feedback_text = $1, graded_by = $2, graded_at = NOW()
+       WHERE id = $3 AND exam_id = $4
+       RETURNING *`,
+      [feedback || null, gradedBy, submissionId, examId]
+    )
+    if (!update.rows.length) throw httpError(404, 'Submission not found')
+
+    // Marks publish immediately — students see the result in the LMS Results page
+    // and their student details, along with the lecturer's feedback.
+    await client.query(
+      `INSERT INTO results (course_id, batch_id, student_id, result_type, score, status, published, published_at, feedback_text, uploaded_by, exam_id)
+       SELECT e.course_id, e.batch_id, s.student_id, 'Exam', $1,
+              (CASE WHEN $1 >= 50 THEN 'Pass' ELSE 'Fail' END), TRUE, NOW(), $2, $3, e.id
+       FROM exams e, exam_submissions s
+       WHERE e.id = $4 AND s.id = $5
+       ON CONFLICT (course_id, student_id, result_type)
+       DO UPDATE SET score = EXCLUDED.score, status = EXCLUDED.status,
+                     published = TRUE, published_at = NOW(), feedback_text = EXCLUDED.feedback_text,
+                     uploaded_by = EXCLUDED.uploaded_by, exam_id = EXCLUDED.exam_id`,
+      [numericScore, feedback || null, gradedBy, examId, submissionId]
+    )
+
+    await client.query('COMMIT')
+    res.json(update.rows[0])
+  } catch (error) {
+    await client.query('ROLLBACK')
+    next(error)
+  } finally {
+    client.release()
+  }
+}
+
+export const publishExamResults = async (req, res, next) => {
+  try {
+    const examId = Number(req.params.id)
+    if (!examId) throw httpError(400, 'Valid examId is required')
+
+    const result = await query(
+      `UPDATE results
+       SET published = TRUE, published_at = NOW()
+       WHERE course_id = (SELECT course_id FROM exams WHERE id = $1)
+         AND result_type = 'Exam'`,
+      [examId]
+    )
+
+    res.json({ published: true, updated: result.rowCount })
+  } catch (error) {
+    next(error)
+  }
+}
+
+// ── Lecturer marking portal ─────────────────────────────────────────
+// Exams a lecturer can mark: courses they own or co-own. Admins see everything.
+export const listMarkingExams = async (req, res, next) => {
+  try {
+    const isLecturer = req.user.role === 'lecturer'
+    const scope = isLecturer
+      ? 'AND (c.lecturer_id = $1 OR c.secondary_lecturer_id = $1)'
+      : ''
+
+    const result = await query(
+      `SELECT ex.id, ex.title, ex.description, ex.exam_type, ex.due_date,
+              ex.duration_minutes, ex.results_release_at,
+              c.id AS course_id, c.title AS course_title,
+              (SELECT COUNT(*)::int FROM exam_deliveries d WHERE d.exam_id = ex.id) AS delivered_count,
+              (SELECT COUNT(*)::int FROM exam_submissions es WHERE es.exam_id = ex.id) AS submitted_count,
+              (SELECT COUNT(*)::int FROM exam_submissions es WHERE es.exam_id = ex.id AND es.status = 'pending_marking') AS pending_marking_count,
+              (SELECT COUNT(*)::int FROM exam_submissions es WHERE es.exam_id = ex.id AND es.status = 'marked') AS marked_count,
+              (SELECT COUNT(*)::int FROM exam_submissions es WHERE es.exam_id = ex.id AND es.result_sent_at IS NULL) AS results_pending_release
+       FROM exams ex
+       JOIN courses c ON c.id = ex.course_id
+       WHERE 1 = 1 ${scope}
+       ORDER BY ex.due_date DESC NULLS LAST, ex.id DESC`,
+      isLecturer ? [req.user.userId] : []
+    )
+
+    res.json(result.rows)
+  } catch (error) {
+    next(error)
+  }
+}
+
+// Set / update the date when MCQ results become visible to students
+export const setExamResultsRelease = async (req, res, next) => {
+  try {
+    const examId = Number(req.params.examId)
+    if (!examId) throw httpError(400, 'Valid examId is required')
+
+    if (req.user.role === 'lecturer') {
+      const owned = await query(
+        `SELECT 1 FROM exams ex JOIN courses c ON c.id = ex.course_id
+         WHERE ex.id = $1 AND (c.lecturer_id = $2 OR c.secondary_lecturer_id = $2)`,
+        [examId, req.user.userId]
+      )
+      if (!owned.rows.length) throw httpError(403, 'This exam is not in your assigned courses')
+    }
+
+    let releaseAt = null
+    if (req.body?.releaseAt) {
+      const d = new Date(req.body.releaseAt)
+      if (Number.isNaN(d.getTime())) throw httpError(400, 'releaseAt must be a valid date')
+      releaseAt = d.toISOString()
+    }
+
+    const updated = await query(
+      `UPDATE exams SET results_release_at = $1 WHERE id = $2 RETURNING id, results_release_at`,
+      [releaseAt, examId]
+    )
+    if (!updated.rows.length) throw httpError(404, 'Exam not found')
+    res.json(updated.rows[0])
+  } catch (error) {
+    next(error)
+  }
+}
